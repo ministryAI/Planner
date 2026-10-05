@@ -659,6 +659,8 @@ MAIL_CACHE = DATA_FILE.parent / "work-email.json"
 _BANNER = re.compile(r"^\s*(\[?external\]?:?\s*)?(caution|warning|notice)?\s*:?\s*(this (e-?mail|message) (originated|came|was sent) from (outside|an external)[^.]*\.([^.]*(click|open|attachments|sender|safe|trust)[^.]*\.){0,3})\s*", re.I)
 _AUTO_FROM = re.compile(r"(no-?reply|do-?not-?reply|notification|notifications|mailer|newsletter|news@|marketing|bounce|alerts?@|system|automated|calendar-notification|support@|info@|updates?@|digest)", re.I)
 _PROMO = re.compile(r"(unsubscribe|view (this|it) in your browser|newsletter|webinar|% off|sale ends|limited time|register now|special offer|promo|your (order|receipt|invoice)|has been shipped|password reset|verification code)", re.I)
+# A short closing note ("Thanks!", "Got it", "Sounds good") after the user's reply: a hint that no reply is needed.
+_ACK = re.compile(r"^\W*(thanks?( you)?( so much| very much| again)?|thank you|thx|ty|got it|sounds good|perfect|great|awesome|ok(ay)?|will do|noted|appreciate (it|you|this)|received|much appreciated)\b", re.I)
 _ASK = re.compile(r"(\?|\bcan you\b|\bcould you\b|\bwould you\b|\bplease\b|\blet me know\b|\bneed\b|\bwhen (can|will|do)\b|\bwhat (time|date|do you)\b|\bthoughts\b|\bconfirm\b|\bapprove\b|\bsend (me|over)\b|\bfollow(ing)? up\b|\bany update\b)", re.I)
 
 
@@ -784,12 +786,15 @@ def _mail_threads(msgs):
         kind = _mail_kind(latest_in) if latest_in else "person"
         direct = bool(latest_in) and (not me or any(r.get("address") == me for r in latest_in["to"]))
         ask = bool(latest_in) and bool(_ASK.search(latest_in["preview"]) or _ASK.search(latest_in["subject"]))
+        # every message after the user's last reply is a short thank-you/acknowledgment with no question
+        ack = bool(last_mine) and bool(theirs_after) and all(len(x["preview"]) < 160 and _ACK.search(x["preview"]) and "?" not in x["preview"] for x in theirs_after)
         since_h = round((now - last["ts"]) / 3600000, 1)
         waiting_h = round((now - theirs_after[0]["ts"]) / 3600000, 1) if theirs_after else 0
         score = 0
         if state == "POTENTIALLY_NEEDS_REPLY":
             score = 40 + (25 if kind == "person" else -30) + (10 if direct else -15) + (15 if ask else 0) \
-                + (10 if latest_in["importance"] == "high" else 0) + min(15, (len(theirs_after) - 1) * 6) + min(15, waiting_h / 8) + (5 if not latest_in["read"] else 0)
+                + (10 if latest_in["importance"] == "high" else 0) + min(15, (len(theirs_after) - 1) * 6) + min(15, waiting_h / 8) + (5 if not latest_in["read"] else 0) \
+                - (60 if ack else 0)
         people = {}
         for x in ms:
             for p in [x["from"]] + x["to"] + x["cc"]:
@@ -797,7 +802,10 @@ def _mail_threads(msgs):
                     people.setdefault(p["address"], p.get("name") or p["address"])
         threads.append({"id": _short_id(conv), "conv": conv, "subject": ms[0]["subject"], "state": state,
                         "last_from_me": last["mine"], "from": counterpart, "internal": _internal(counterpart.get("address", "")),
-                        "kind": kind, "direct": direct, "ask": ask, "followups": max(0, len(theirs_after) - 1),
+                        "kind": kind, "direct": direct, "ask": ask, "ack": ack,
+                        # the user's own last message, and what others wrote after it: stated outright so Diana can't mix them up
+                        "replied_ts": last_mine or None,
+                        "after_reply": [{"when": x["ts"], "who": x["from"].get("name") or x["from"].get("address"), "preview": x["preview"][:160]} for x in theirs_after][-3:] if last_mine else [], "followups": max(0, len(theirs_after) - 1),
                         "waiting_hours": waiting_h, "since_hours": since_h, "last_ts": last["ts"], "count": len(ms),
                         "people": list(people.values())[:6], "latest_preview": last["preview"][:400], "score": round(score, 1),
                         # the recent exchange, so Diana sees the conversation and not a single email
@@ -824,7 +832,7 @@ async def _feed_get(url):
     return json.loads(text)
 
 
-MAIL_ANALYSIS = 2  # bump when _mail_threads changes; cached snapshots are re-analyzed
+MAIL_ANALYSIS = 3  # bump when _mail_threads changes; cached snapshots are re-analyzed
 
 
 async def _mail_refresh(force=False):

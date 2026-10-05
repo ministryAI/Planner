@@ -606,7 +606,15 @@ function AssistantView(ctx) {
     try {
       // Asked about email: look up who is waiting first, so a small model doesn't have to decide to.
       let mail = '';
-      if (typeof agentEmailOn === 'function' && agentEmailOn() && /\b(e-?mails?|inbox|repl(y|ies|ied)|respond(ed)?|get back to|waiting (on|for)|follow(ed)? up|owe|behind on|heard back)\b/i.test(text)) {
+      // "did I respond to Chris?" / "are you sure I didn't reply to Chris?" → read that conversation, not the whole inbox
+      const didI = typeof agentEmailOn === 'function' && agentEmailOn() && text.match(/\b(?:did i|have i|i did(?:n'?t| not)|are you sure i)\b.*?\b(?:respond|reply|replied|responded|get back|answer(?:ed)?)\b\s*(?:to|back to)?\s*(.{2,80})/i);
+      if (didI) {
+        patch(id, () => ({ steps: ['email_search'] }));
+        const found = await agentEmailTool('email_search', { query: didI[1] }, refs);
+        const first = Object.keys(refs).find((k) => /^E\d+$/.test(k));
+        mail = found + (first && !/^No matching/.test(found) ? '\n\nFull conversation ' + first + ':\n' + await agentEmailTool('email_thread', { ref: first }, refs) : '');
+      }
+      if (!mail && (typeof agentEmailOn === 'function' && agentEmailOn() && /\b(e-?mails?|inbox|repl(y|ies|ied)|respond(ed)?|get back to|waiting (on|for)|follow(ed)? up|owe|behind on|heard back)\b/i.test(text))) {
         // "waiting for/on them" → what the user is waiting on; anything else → who may be waiting on the user
         const tool = /\bwaiting (for|on) (them|someone|others|people|a reply|replies|an answer)\b|\bhaven'?t (heard|gotten) back\b|\bno (reply|answer) yet\b/i.test(text) ? 'email_waiting' : 'email_attention';
         patch(id, () => ({ steps: [tool] }));
