@@ -606,9 +606,19 @@ function AssistantView(ctx) {
     try {
       // Asked about email: look up who is waiting first, so a small model doesn't have to decide to.
       let mail = '';
-      if (typeof agentEmailOn === 'function' && agentEmailOn() && /\b(e-?mails?|inbox|repl(y|ies|ied)|respond(ed)?|get back to|waiting on me|follow(ed)? up|owe)\b/i.test(text)) {
-        patch(id, () => ({ steps: ['email_attention'] }));
-        mail = await agentEmailTool('email_attention', {}, refs);
+      if (typeof agentEmailOn === 'function' && agentEmailOn() && /\b(e-?mails?|inbox|repl(y|ies|ied)|respond(ed)?|get back to|waiting (on|for)|follow(ed)? up|owe|behind on|heard back)\b/i.test(text)) {
+        // "waiting for/on them" → what the user is waiting on; anything else → who may be waiting on the user
+        const tool = /\bwaiting (for|on) (them|someone|others|people|a reply|replies|an answer)\b|\bhaven'?t (heard|gotten) back\b|\bno (reply|answer) yet\b/i.test(text) ? 'email_waiting' : 'email_attention';
+        patch(id, () => ({ steps: [tool] }));
+        mail = await agentEmailTool(tool, {}, refs);
+      }
+      // "what happened with Chris and the Red Shield Club?" → find that conversation and read it whole
+      const about = typeof agentEmailOn === 'function' && agentEmailOn() && !mail && text.match(/\b(?:what happened with|where did we land (?:on|with)|catch me up on|update on|status of|any word (?:from|on)|did (\w+) (?:ever )?(?:reply|respond|get back))\s*(.{2,80})/i);
+      if (about) {
+        patch(id, () => ({ steps: ['email_search'] }));
+        const found = await agentEmailTool('email_search', { query: (about[2] || '') + ' ' + (about[1] || '') }, refs);
+        const first = Object.keys(refs).find((k) => /^E\d+$/.test(k));
+        mail = found + (first && !/^No matching/.test(found) ? '\n\nFull conversation ' + first + ':\n' + await agentEmailTool('email_thread', { ref: first }, refs) : '');
       }
       const base = kinSystem(state, plan, text) + (ci ? '\n\n' + ci.block : '') + (mail ? '\n\nWORK EMAIL (looked up by Steward for this message; read-only, you cannot send):\n' + mail : '')
         + (compact && compact.points.length ? '\n\nEarlier in this conversation:\n' + compact.points.map((p) => '- ' + p).join('\n') : '')

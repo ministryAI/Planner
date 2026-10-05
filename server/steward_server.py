@@ -688,7 +688,11 @@ def _internal(address):
     return any(dom == d or dom.endswith("." + d) for d in MAIL_DOMAINS)
 
 
+_SENT_FOLDERS = {"sent", "sentitems", "sent items", "sent mail", "sent messages", "outbox"}
+
+
 def _mail_normalize(raw):
+    """Flat Power Automate records → one clean record per message. No grouping or judgment here."""
     if isinstance(raw, str):
         raw = json.loads(raw)
     if isinstance(raw, dict):
@@ -706,30 +710,46 @@ def _mail_normalize(raw):
         frm = frm[0] if isinstance(frm, list) and frm else frm or {"name": "", "address": ""}
         preview = re.sub(r"\s+", " ", str(e.get("bodyPreview") or "")).strip()
         preview = _BANNER.sub("", preview, count=1).strip()
-        msgs.append({"id": _short_id(str(e.get("internetMessageId") or e.get("id") or "") + str(t)), "conv": str(e.get("conversationId") or e.get("id") or ""),
-                     "ts": int(t.timestamp() * 1000), "folder": "sent" if str(e.get("sourceFolder") or "").lower() == "sent" else "inbox",
+        folder = re.sub(r"[\s_-]+", " ", str(e.get("sourceFolder") or "")).strip().lower()
+        msgs.append({"id": _short_id(str(e.get("internetMessageId") or e.get("id") or "") + str(t)),
+                     "conv": str(e.get("conversationId") or "").strip() or ("subj:" + _subject_key(e.get("subject"))),
+                     "ts": int(t.timestamp() * 1000), "src_folder": folder,
                      "from": frm, "to": _as_list(e.get("toRecipients")), "cc": _as_list(e.get("ccRecipients")),
                      "subject": str(e.get("subject") or "(no subject)").strip()[:300], "preview": preview[:600],
                      "read": bool(e.get("isRead")), "importance": str(e.get("importance") or "normal").lower(), "attach": bool(e.get("hasAttachments"))})
-    # de-duplicate (a message can appear in both folders when you email yourself) and sort
     seen, out = set(), []
     for m in sorted(msgs, key=lambda x: x["ts"]):
-        k = (m["id"], m["folder"])
-        if k not in seen:
-            seen.add(k); out.append(m)
+        if m["id"] not in seen:  # a message you send yourself shows up in both folders
+            seen.add(m["id"]); out.append(m)
     return out
 
 
+def _subject_key(subject):
+    """Fallback grouping only when a record has no conversationId: subject without Re:/Fw: prefixes."""
+    return re.sub(r"^\s*((re|fw|fwd|aw|wg)\s*:\s*)+", "", str(subject or ""), flags=re.I).strip().lower()
+
+
 def _mail_me(msgs):
-    """The user's own address: whoever sends the Sent Items."""
+    """The user's own address, by evidence in order: DIANA_WORK_EMAIL_ADDRESS, the sender of Sent Items,
+    then whoever most inbox messages are addressed to."""
+    own = os.environ.get("DIANA_WORK_EMAIL_ADDRESS", "").strip().lower()
+    if own:
+        return own
     counts = {}
     for m in msgs:
-        if m["folder"] == "sent" and m["from"].get("address"):
+        if m["src_folder"] in _SENT_FOLDERS and m["from"].get("address"):
             counts[m["from"]["address"]] = counts.get(m["from"]["address"], 0) + 1
+    if counts:
+        return max(counts, key=counts.get)
+    for m in msgs:
+        for r in m["to"]:
+            if r.get("address"):
+                counts[r["address"]] = counts.get(r["address"], 0) + 1
     return max(counts, key=counts.get) if counts else ""
 
 
 def _mail_kind(m):
+    """A hint for Diana, not a verdict: looks automated / like a newsletter / like a person."""
     a = m["from"].get("address", "")
     if _AUTO_FROM.search(a) or _AUTO_FROM.search(m["from"].get("name", "")):
         return "automated"
@@ -739,48 +759,49 @@ def _mail_kind(m):
 
 
 def _mail_threads(msgs):
+    """Deterministic facts per conversation. A message is the user's own if it came from Sent Items OR its sender is
+    the user's address, so a missing or differently named sourceFolder can't turn a reply into an inbound email.
+    State: RESPONDED (user spoke last) or POTENTIALLY_NEEDS_REPLY (someone else spoke last). Whether a reply is
+    actually warranted ("Thanks!", FYI, automated) is Diana's judgment; the hints below help her."""
     me = _mail_me(msgs)
     now = int(time.time() * 1000)
+    for m in msgs:
+        m["mine"] = m["src_folder"] in _SENT_FOLDERS or (bool(me) and m["from"].get("address") == me)
+        m["folder"] = "sent" if m["mine"] else "inbox"
     convs = {}
     for m in msgs:
         convs.setdefault(m["conv"], []).append(m)
     threads = []
     for conv, ms in convs.items():
-        ms.sort(key=lambda x: x["ts"])
+        ms.sort(key=lambda x: (x["ts"], x["mine"]))  # chronological; on an exact tie the reply sorts after
         last = ms[-1]
-        last_sent = max((x["ts"] for x in ms if x["folder"] == "sent"), default=0)
-        inbound_after = [x for x in ms if x["folder"] == "inbox" and x["ts"] > last_sent]
-        first_in = inbound_after[0] if inbound_after else None
-        latest_in = inbound_after[-1] if inbound_after else None
+        last_mine = max((x["ts"] for x in ms if x["mine"]), default=0)
+        theirs_after = [x for x in ms if not x["mine"] and x["ts"] > last_mine]
+        latest_in = theirs_after[-1] if theirs_after else None
+        state = "RESPONDED" if last["mine"] else "POTENTIALLY_NEEDS_REPLY"
+        other = latest_in or next((x for x in reversed(ms) if not x["mine"]), None)
+        counterpart = other["from"] if other else (last["to"][0] if last["to"] else {"name": "", "address": ""})
         kind = _mail_kind(latest_in) if latest_in else "person"
         direct = bool(latest_in) and (not me or any(r.get("address") == me for r in latest_in["to"]))
-        if last["folder"] == "sent":
-            state = "USER_REPLIED"
-        elif not latest_in:
-            state = "UNKNOWN"
-        elif kind != "person":
-            state = "LIKELY_RESOLVED"  # automated or newsletter: nobody is waiting
-        elif not direct:
-            state = "LIKELY_RESOLVED"  # you were only copied
-        else:
-            state = "AWAITING_USER_REPLY"
+        ask = bool(latest_in) and bool(_ASK.search(latest_in["preview"]) or _ASK.search(latest_in["subject"]))
+        since_h = round((now - last["ts"]) / 3600000, 1)
+        waiting_h = round((now - theirs_after[0]["ts"]) / 3600000, 1) if theirs_after else 0
+        score = 0
+        if state == "POTENTIALLY_NEEDS_REPLY":
+            score = 40 + (25 if kind == "person" else -30) + (10 if direct else -15) + (15 if ask else 0) \
+                + (10 if latest_in["importance"] == "high" else 0) + min(15, (len(theirs_after) - 1) * 6) + min(15, waiting_h / 8) + (5 if not latest_in["read"] else 0)
         people = {}
         for x in ms:
-            if x["folder"] == "inbox" and x["from"].get("address"):
-                people[x["from"]["address"]] = x["from"].get("name") or x["from"]["address"]
-        sender = latest_in["from"] if latest_in else last["from"]
-        ask = bool(latest_in) and bool(_ASK.search(latest_in["preview"]) or _ASK.search(latest_in["subject"]))
-        waiting_h = round((now - first_in["ts"]) / 3600000, 1) if first_in and state == "AWAITING_USER_REPLY" else 0
-        score = 0
-        if state == "AWAITING_USER_REPLY":
-            score = 50 + (20 if ask else 0) + (10 if latest_in["importance"] == "high" else 0) + min(20, len(inbound_after) * 6) + min(20, waiting_h / 6)
-            if not latest_in["read"]:
-                score += 5
-        threads.append({"id": _short_id(conv), "conv": conv, "subject": ms[0]["subject"], "state": state, "kind": kind,
-                        "from": sender, "internal": _internal(sender.get("address", "")), "direct": direct, "ask": ask,
-                        "waiting_hours": waiting_h, "followups": max(0, len(inbound_after) - 1), "last_ts": last["ts"],
-                        "last_from_me": last["folder"] == "sent", "count": len(ms), "people": list(people.values())[:6],
-                        "latest_preview": (latest_in or last)["preview"][:400], "score": round(score, 1)})
+            for p in [x["from"]] + x["to"] + x["cc"]:
+                if p.get("address") and p.get("address") != me:
+                    people.setdefault(p["address"], p.get("name") or p["address"])
+        threads.append({"id": _short_id(conv), "conv": conv, "subject": ms[0]["subject"], "state": state,
+                        "last_from_me": last["mine"], "from": counterpart, "internal": _internal(counterpart.get("address", "")),
+                        "kind": kind, "direct": direct, "ask": ask, "followups": max(0, len(theirs_after) - 1),
+                        "waiting_hours": waiting_h, "since_hours": since_h, "last_ts": last["ts"], "count": len(ms),
+                        "people": list(people.values())[:6], "latest_preview": last["preview"][:400], "score": round(score, 1),
+                        # the recent exchange, so Diana sees the conversation and not a single email
+                        "recent": [{"when": x["ts"], "who": "you" if x["mine"] else (x["from"].get("name") or x["from"].get("address")), "preview": x["preview"][:220]} for x in ms[-4:]]})
     threads.sort(key=lambda t: (-t["score"], -t["last_ts"]))
     return me, threads
 
@@ -803,16 +824,25 @@ async def _feed_get(url):
     return json.loads(text)
 
 
+MAIL_ANALYSIS = 2  # bump when _mail_threads changes; cached snapshots are re-analyzed
+
+
 async def _mail_refresh(force=False):
     cache = _mail_cache_read()
     now = int(time.time())
+    if cache.get("messages") and cache.get("analysis") != MAIL_ANALYSIS:
+        for m in cache["messages"]:
+            m.setdefault("src_folder", m.get("folder", ""))
+        cache["me"], cache["threads"] = _mail_threads(cache["messages"])
+        cache["analysis"] = MAIL_ANALYSIS
+        cache["checked"] = 0  # and fetch a fresh snapshot now
     if not MAIL_FEED_URL or (not force and cache.get("checked", 0) > now - WORK_TTL):
         return cache
     cache["checked"] = now
     try:
         msgs = _mail_normalize(await _feed_get(MAIL_FEED_URL))
         me, threads = _mail_threads(msgs)
-        cache.update({"messages": msgs, "threads": threads, "me": me, "synced": now, "error": None})
+        cache.update({"messages": msgs, "threads": threads, "me": me, "synced": now, "error": None, "analysis": MAIL_ANALYSIS})
     except Exception as e:
         cache["error"] = str(e)[:300]
     try:
@@ -838,7 +868,7 @@ async def email_status(request: Request):
     c = await _mail_refresh()
     th = c.get("threads") or []
     return {"configured": bool(MAIL_FEED_URL), "synced": c.get("synced"), "messages": len(c.get("messages") or []), "threads": len(th),
-            "awaiting": sum(1 for t in th if t["state"] == "AWAITING_USER_REPLY"), "error": c.get("error")}
+            "awaiting": sum(1 for t in th if t["state"] == "POTENTIALLY_NEEDS_REPLY" and t["kind"] == "person"), "me": c.get("me"), "error": c.get("error")}
 
 
 @app.get("/v1/email/attention")
@@ -847,8 +877,20 @@ async def email_attention(request: Request, limit: int = 8):
     if bad:
         return bad
     c = await _mail_refresh()
-    th = [t for t in (c.get("threads") or []) if t["state"] == "AWAITING_USER_REPLY"]
-    return {"synced": c.get("synced"), "stale": bool(c.get("error")), "threads": th[:max(1, min(limit, 25))], "total": len(th)}
+    th = [t for t in (c.get("threads") or []) if t["state"] == "POTENTIALLY_NEEDS_REPLY"]
+    return {"synced": c.get("synced"), "stale": bool(c.get("error")), "threads": th[:max(1, min(limit, 25))], "total": len(th),
+            "people": sum(1 for t in th if t["kind"] == "person")}
+
+
+@app.get("/v1/email/waiting")
+async def email_waiting(request: Request, limit: int = 8):
+    """Conversations where the user spoke last: they may be waiting on someone else."""
+    bad = _mail_unauth(request)
+    if bad:
+        return bad
+    c = await _mail_refresh()
+    th = sorted([t for t in (c.get("threads") or []) if t["state"] == "RESPONDED" and t["kind"] == "person"], key=lambda t: -t["last_ts"])
+    return {"synced": c.get("synced"), "threads": th[:max(1, min(limit, 25))], "total": len(th)}
 
 
 @app.get("/v1/email/search")
@@ -876,7 +918,8 @@ async def email_thread(request: Request, id: str = ""):
     if not t:
         return JSONResponse({"error": "No conversation with that id."}, status_code=404)
     ms = [m for m in (c.get("messages") or []) if m["conv"] == t["conv"]]
-    return {"thread": t, "me": c.get("me"), "messages": [{"when": m["ts"], "folder": m["folder"], "from": m["from"], "to": m["to"], "cc": m["cc"], "subject": m["subject"], "preview": m["preview"], "attach": m["attach"]} for m in ms][-12:]}
+    ms.sort(key=lambda x: (x["ts"], x.get("mine", x["folder"] == "sent")))
+    return {"thread": t, "me": c.get("me"), "messages": [{"when": m["ts"], "mine": m.get("mine", m["folder"] == "sent"), "from": m["from"], "to": m["to"], "cc": m["cc"], "subject": m["subject"], "preview": m["preview"], "attach": m["attach"]} for m in ms][-16:]}
 
 
 @app.get("/v1/workcal")
