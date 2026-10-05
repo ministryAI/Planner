@@ -20,9 +20,12 @@ const AGENT_TOOLS_PROMPT = '\n\nBefore answering you may look things up. To use 
   + 'Use tools only when the snapshot is not enough. Never show tool blocks to the user in a final answer.';
 /* Work email tools, only when the Steward server has the email feed. Read-only: Diana drafts, never sends. */
 const AGENT_EMAIL_PROMPT = '\nWork email (read-only; previews only):\n'
-  + '- email_attention {}: conversations where someone is waiting on the user (Steward has already checked there is no later reply from them), most urgent first, with E# refs.\n'
+  + '- email_attention {}: conversations where someone else wrote last, so they may need a reply, most likely first, with E# refs.\n'
+  + '- email_waiting {}: conversations where the user wrote last, so the user may be waiting on someone else.\n'
   + '- email_search {query}: conversations matching a person, subject or words.\n'
-  + '- email_thread {ref: "E#"}: the messages in one conversation, oldest first.\n'
+  + '- email_thread {ref: "E#"}: every message in one conversation, oldest first. Use it before summarizing or drafting.\n'
+  + 'Steward has already grouped each conversation and worked out who wrote last; trust "you wrote last" and never say the user has not replied when it says so. '
+  + 'You judge the meaning: whether the latest message really needs a reply (a "thanks" or an FYI usually does not), whether it is automated or noise, what is being asked, and how important it is. '
   + 'You cannot send email. When asked, write a short draft reply in plain text after "Draft reply:" for the user to copy. Never say a message was sent.';
 const agentEmailOn = () => { const sp = typeof kinSpace === 'function' ? kinSpace() : null; return !!(sp && sp.features && sp.features.includes('email')); };
 const agentToolsPrompt = () => AGENT_TOOLS_PROMPT + (agentEmailOn() ? AGENT_EMAIL_PROMPT : '');
@@ -36,20 +39,23 @@ async function agentEmail(path) {
 const agoH = (h) => (h >= 48 ? Math.round(h / 24) + ' days' : h >= 1 ? Math.round(h) + ' hours' : 'under an hour');
 function emailLine(t, refs) {
   const ref = 'E' + (Object.keys(refs).filter((k) => k[0] === 'E').length + 1); refs[ref] = t.id;
-  return '[' + ref + '] ' + (t.from.name || t.from.address) + (t.internal ? ' (internal)' : ' (external)') + ' — "' + t.subject + '" — '
-    + (t.state === 'AWAITING_USER_REPLY' ? 'waiting on the user ' + agoH(t.waiting_hours) + (t.followups ? ', ' + t.followups + ' follow-up' + (t.followups > 1 ? 's' : '') : '') + (t.ask ? ', asks something' : '')
-      : t.state === 'USER_REPLIED' ? 'the user replied last' : t.kind !== 'person' ? t.kind + ' mail' : 'user was only copied')
-    + '\n   latest: ' + t.latest_preview.slice(0, 280);
+  const who = t.from && (t.from.name || t.from.address) || 'someone';
+  const facts = t.state === 'RESPONDED' ? 'you wrote last, ' + agoH(t.since_hours) + ' ago'
+    : 'they wrote last' + (t.waiting_hours ? ', ' + agoH(t.waiting_hours) + ' since their first unanswered message' : '') + (t.followups ? ', ' + t.followups + ' follow-up' + (t.followups > 1 ? 's' : '') : '');
+  const hints = [t.internal ? 'internal' : 'external', t.kind !== 'person' ? 'looks ' + t.kind : null, t.state !== 'RESPONDED' && !t.direct ? 'user only copied' : null, t.state !== 'RESPONDED' && t.ask ? 'latest seems to ask something' : null].filter(Boolean).join(', ');
+  const recent = (t.recent || []).map((m) => '   ' + fmtD(m.when) + ' ' + (m.who === 'you' ? 'You' : m.who) + ': ' + m.preview).join('\n');
+  return '[' + ref + '] "' + t.subject + '" with ' + who + ' (' + hints + ') — ' + facts + (t.count > (t.recent || []).length ? ' — ' + t.count + ' messages, latest shown:' : ':') + '\n' + recent;
 }
 async function agentEmailTool(name, args, refs) {
   if (!agentEmailOn()) return 'Work email is not connected.';
   try {
-    if (name === 'email_attention') { const d = await agentEmail('/v1/email/attention?limit=8'); return d.threads.length ? d.total + ' conversation' + (d.total === 1 ? '' : 's') + ' waiting on the user:\n' + d.threads.map((t) => emailLine(t, refs)).join('\n') : 'Nobody is waiting on a reply.'; }
+    if (name === 'email_attention') { const d = await agentEmail('/v1/email/attention?limit=8'); return d.threads.length ? d.total + ' conversation' + (d.total === 1 ? '' : 's') + ' where someone else wrote last (Steward checked: no later message from the user). Judge which really need a reply:\n' + d.threads.map((t) => emailLine(t, refs)).join('\n') : 'In every conversation, the user wrote last.'; }
+    if (name === 'email_waiting') { const d = await agentEmail('/v1/email/waiting?limit=8'); return d.threads.length ? d.total + ' conversation' + (d.total === 1 ? '' : 's') + ' where the user wrote last and may be waiting on someone:\n' + d.threads.map((t) => emailLine(t, refs)).join('\n') : 'No conversations where the user is waiting on someone.'; }
     if (name === 'email_search') { const d = await agentEmail('/v1/email/search?limit=8&q=' + encodeURIComponent(args.query || '')); return d.threads.length ? d.threads.map((t) => emailLine(t, refs)).join('\n') : 'No matching email.'; }
     if (name === 'email_thread') {
       const id = refs[args.ref] || args.ref;
       const d = await agentEmail('/v1/email/thread?id=' + encodeURIComponent(id || ''));
-      return '"' + d.thread.subject + '"\n' + d.messages.map((m) => fmtD(m.when) + ' ' + fmtT(m.when) + ' ' + (m.folder === 'sent' ? 'The user' : (m.from.name || m.from.address)) + ': ' + m.preview).join('\n');
+      return '"' + d.thread.subject + '" (' + (d.thread.state === 'RESPONDED' ? 'the user wrote last' : 'someone else wrote last') + ')\n' + d.messages.map((m) => fmtD(m.when) + ' ' + fmtT(m.when) + ' ' + (m.mine ? 'You' : (m.from.name || m.from.address)) + ': ' + m.preview).join('\n');
     }
   } catch (e) { return 'Email lookup failed: ' + e.message; }
   return 'Unknown tool "' + name + '".';
@@ -121,7 +127,7 @@ function agentToolCall(text) {
   if (!m) return null;
   try { const j = JSON.parse(m[1].trim()); return j && j.name ? { name: String(j.name), args: j.args || {} } : null; } catch (e) { return { name: 'invalid', args: {}, bad: m[1].slice(0, 200) }; }
 }
-const AGENT_TOOL_LABEL = { email_attention: 'Checking email', email_search: 'Searching email', email_thread: 'Reading the thread', search_tasks: 'Searching tasks', project_status: 'Checking the project', free_time: 'Finding free time', read_note: 'Reading notes', past_conversations: 'Remembering earlier chats', calendar: 'Checking the calendar' };
+const AGENT_TOOL_LABEL = { email_attention: 'Checking email', email_waiting: 'Checking what you’re waiting on', email_search: 'Searching email', email_thread: 'Reading the thread', search_tasks: 'Searching tasks', project_status: 'Checking the project', free_time: 'Finding free time', read_note: 'Reading notes', past_conversations: 'Remembering earlier chats', calendar: 'Checking the calendar' };
 
 /* Runs the loop. onStep(steps) reports each lookup; onText(textSoFar) streams the answer. Returns { text, steps }. */
 async function agentRun({ system, history, state, plan, refs, onStep, onText, maxTokens = 700 }) {
