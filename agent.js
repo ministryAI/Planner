@@ -24,7 +24,7 @@ const AGENT_EMAIL_PROMPT = '\nWork email (read-only; previews only):\n'
   + '- email_waiting {}: conversations where the user wrote last, so the user may be waiting on someone else.\n'
   + '- email_search {query}: conversations matching a person, subject or words.\n'
   + '- email_thread {ref: "E#"}: every message in one conversation, oldest first. Use it before summarizing or drafting.\n'
-  + 'Steward has already grouped each conversation and worked out who wrote last; trust "you wrote last" and never say the user has not replied when it says so. '
+  + 'Steward has already grouped each conversation and worked out who wrote last. Repeat its facts exactly: if it says the user replied, never say the user did not respond. "Someone else wrote last" after a reply means a new message arrived, not that the reply is missing. '
   + 'You judge the meaning: whether the latest message really needs a reply (a "thanks" or an FYI usually does not), whether it is automated or noise, what is being asked, and how important it is. '
   + 'You cannot send email. When asked, write a short draft reply in plain text after "Draft reply:" for the user to copy. Never say a message was sent.';
 const agentEmailOn = () => { const sp = typeof kinSpace === 'function' ? kinSpace() : null; return !!(sp && sp.features && sp.features.includes('email')); };
@@ -41,8 +41,9 @@ function emailLine(t, refs) {
   const ref = 'E' + (Object.keys(refs).filter((k) => k[0] === 'E').length + 1); refs[ref] = t.id;
   const who = t.from && (t.from.name || t.from.address) || 'someone';
   const facts = t.state === 'RESPONDED' ? 'you wrote last, ' + agoH(t.since_hours) + ' ago'
-    : 'they wrote last' + (t.waiting_hours ? ', ' + agoH(t.waiting_hours) + ' since their first unanswered message' : '') + (t.followups ? ', ' + t.followups + ' follow-up' + (t.followups > 1 ? 's' : '') : '');
-  const hints = [t.internal ? 'internal' : 'external', t.kind !== 'person' ? 'looks ' + t.kind : null, t.state !== 'RESPONDED' && !t.direct ? 'user only copied' : null, t.state !== 'RESPONDED' && t.ask ? 'latest seems to ask something' : null].filter(Boolean).join(', ');
+    : (t.replied_ts ? 'the user DID reply on ' + fmtD(t.replied_ts) + '; after that ' + (t.after_reply || []).map((m) => m.who + ' wrote on ' + fmtD(m.when)).join(', ') + ', so someone else wrote last'
+      : 'the user has not replied in this conversation') + (t.waiting_hours ? ', ' + agoH(t.waiting_hours) + ' since the first message after that' : '');
+  const hints = [t.internal ? 'internal' : 'external', t.kind !== 'person' ? 'looks ' + t.kind : null, t.state !== 'RESPONDED' && !t.direct ? 'user only copied' : null, t.state !== 'RESPONDED' && t.ack ? 'latest is just a thank-you or acknowledgment: probably no reply needed' : null, t.state !== 'RESPONDED' && t.ask && !t.ack ? 'latest seems to ask something' : null].filter(Boolean).join(', ');
   const recent = (t.recent || []).map((m) => '   ' + fmtD(m.when) + ' ' + (m.who === 'you' ? 'You' : m.who) + ': ' + m.preview).join('\n');
   return '[' + ref + '] "' + t.subject + '" with ' + who + ' (' + hints + ') — ' + facts + (t.count > (t.recent || []).length ? ' — ' + t.count + ' messages, latest shown:' : ':') + '\n' + recent;
 }
@@ -55,7 +56,7 @@ async function agentEmailTool(name, args, refs) {
     if (name === 'email_thread') {
       const id = refs[args.ref] || args.ref;
       const d = await agentEmail('/v1/email/thread?id=' + encodeURIComponent(id || ''));
-      return '"' + d.thread.subject + '" (' + (d.thread.state === 'RESPONDED' ? 'the user wrote last' : 'someone else wrote last') + ')\n' + d.messages.map((m) => fmtD(m.when) + ' ' + fmtT(m.when) + ' ' + (m.mine ? 'You' : (m.from.name || m.from.address)) + ': ' + m.preview).join('\n');
+      return '"' + d.thread.subject + '" (' + (d.thread.state === 'RESPONDED' ? 'the user wrote last' : d.thread.replied_ts ? 'the user replied on ' + fmtD(d.thread.replied_ts) + ', then someone else wrote' : 'the user has not replied') + ')\n' + d.messages.map((m) => fmtD(m.when) + ' ' + fmtT(m.when) + ' ' + (m.mine ? 'You' : (m.from.name || m.from.address)) + ': ' + m.preview).join('\n');
     }
   } catch (e) { return 'Email lookup failed: ' + e.message; }
   return 'Unknown tool "' + name + '".';

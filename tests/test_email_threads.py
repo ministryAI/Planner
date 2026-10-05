@@ -96,3 +96,40 @@ class ReplyState(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReplyThenThanks(unittest.TestCase):
+    """You replied, then someone on the thread wrote back: the reply must still be stated, and a thank-you flagged."""
+    CHAROL = "Charol.Smith@usc.salvationarmy.org"
+
+    def feed(self, last_preview):
+        return [ChristopherWhite.inbound, ChristopherWhite.reply,
+                msg("2026-09-22T09:00:00+00:00", self.CHAROL, CHRIS, "RE: Red Shield Clubs in GLD?", last_preview)]
+
+    def test_thanks_after_reply(self):
+        _, th = threads(self.feed("Thanks so much, Justin!"))
+        t = th["Red Shield Clubs in GLD?"]
+        self.assertEqual(t["state"], "POTENTIALLY_NEEDS_REPLY")
+        self.assertTrue(t["ack"])
+        self.assertTrue(t["replied_ts"])
+        self.assertEqual([m["who"] for m in t["after_reply"]], [self.CHAROL.lower()])
+        self.assertLess(t["score"], 40)
+
+    def test_question_after_reply_is_not_ack(self):
+        _, th = threads(self.feed("Thanks! Which corps are they at?"))
+        self.assertFalse(th["Red Shield Clubs in GLD?"]["ack"])
+
+    def test_never_replied(self):
+        _, th = threads([ChristopherWhite.inbound])
+        t = th["Red Shield Clubs in GLD?"]
+        self.assertIsNone(t["replied_ts"])
+        self.assertEqual(t["after_reply"], [])
+
+    def test_real_sep28_followup(self):
+        """Chris's actual Sep 28 reply-all: greeting line, thanks, 'we will wait to hear more from you', asks others."""
+        preview = ("Justin\r\n\r\nThanks for this helpful information. The material and roll out looks good. We will wait to hear more "
+                   "from you after you have a firmer plan regarding roll out.\r\n\r\n@Wes and @Charol, let’s think of 2-3 locations that could use this type of plan to ")
+        feed = [ChristopherWhite.inbound, ChristopherWhite.reply, msg("2026-09-28T17:19:40+00:00", CHRIS, ME, "RE: Red Shield Clubs in GLD?", preview)]
+        t = threads(feed)[1]["Red Shield Clubs in GLD?"]
+        self.assertTrue(t["ack"])
+        self.assertTrue(t["replied_ts"])
