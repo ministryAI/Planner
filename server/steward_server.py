@@ -661,6 +661,16 @@ _AUTO_FROM = re.compile(r"(no-?reply|do-?not-?reply|notification|notifications|m
 _PROMO = re.compile(r"(unsubscribe|view (this|it) in your browser|newsletter|webinar|% off|sale ends|limited time|register now|special offer|promo|your (order|receipt|invoice)|has been shipped|password reset|verification code)", re.I)
 # A short closing note ("Thanks!", "Got it", "Sounds good") after the user's reply: a hint that no reply is needed.
 _ACK = re.compile(r"^\W*(thanks?( you)?( so much| very much| again)?|thank you|thx|ty|got it|sounds good|perfect|great|awesome|ok(ay)?|will do|noted|appreciate (it|you|this)|received|much appreciated)\b", re.I)
+_GREETING = re.compile(r"^\s*((hi|hello|hey|dear|good (morning|afternoon|evening))\b[^,.!\n]{0,40}[,.!]?|[A-Z][a-z]+( [A-Z][a-z]+)?[,.!]?(?=\s{2,}|\s*$))\s*")
+_THEY_WAIT = re.compile(r"\b(we|i)('ll| will) (wait|look forward) (to hear|for)|\blook(ing)? forward to hearing\b|\bno (need to|rush)\b|\bwhen you (have|get) (a|more)\b", re.I)
+
+
+def _is_ack(preview):
+    """Opens with thanks or an acknowledgment once the greeting is stripped, and asks nothing ("?") of the user."""
+    body = _GREETING.sub("", preview, count=1)
+    return "?" not in preview and len(body) < 400 and bool(_ACK.search(body) or _THEY_WAIT.search(body))
+
+
 _ASK = re.compile(r"(\?|\bcan you\b|\bcould you\b|\bwould you\b|\bplease\b|\blet me know\b|\bneed\b|\bwhen (can|will|do)\b|\bwhat (time|date|do you)\b|\bthoughts\b|\bconfirm\b|\bapprove\b|\bsend (me|over)\b|\bfollow(ing)? up\b|\bany update\b)", re.I)
 
 
@@ -787,7 +797,7 @@ def _mail_threads(msgs):
         direct = bool(latest_in) and (not me or any(r.get("address") == me for r in latest_in["to"]))
         ask = bool(latest_in) and bool(_ASK.search(latest_in["preview"]) or _ASK.search(latest_in["subject"]))
         # every message after the user's last reply is a short thank-you/acknowledgment with no question
-        ack = bool(last_mine) and bool(theirs_after) and all(len(x["preview"]) < 160 and _ACK.search(x["preview"]) and "?" not in x["preview"] for x in theirs_after)
+        ack = bool(last_mine) and bool(theirs_after) and all(_is_ack(x["preview"]) for x in theirs_after)
         since_h = round((now - last["ts"]) / 3600000, 1)
         waiting_h = round((now - theirs_after[0]["ts"]) / 3600000, 1) if theirs_after else 0
         score = 0

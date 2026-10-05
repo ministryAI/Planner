@@ -124,3 +124,12 @@ class ReplyThenThanks(unittest.TestCase):
         t = th["Red Shield Clubs in GLD?"]
         self.assertIsNone(t["replied_ts"])
         self.assertEqual(t["after_reply"], [])
+
+    def test_real_sep28_followup(self):
+        """Chris's actual Sep 28 reply-all: greeting line, thanks, 'we will wait to hear more from you', asks others."""
+        preview = ("Justin\r\n\r\nThanks for this helpful information. The material and roll out looks good. We will wait to hear more "
+                   "from you after you have a firmer plan regarding roll out.\r\n\r\n@Wes and @Charol, let’s think of 2-3 locations that could use this type of plan to ")
+        feed = [ChristopherWhite.inbound, ChristopherWhite.reply, msg("2026-09-28T17:19:40+00:00", CHRIS, ME, "RE: Red Shield Clubs in GLD?", preview)]
+        t = threads(feed)[1]["Red Shield Clubs in GLD?"]
+        self.assertTrue(t["ack"])
+        self.assertTrue(t["replied_ts"])
