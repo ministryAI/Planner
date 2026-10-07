@@ -18,7 +18,7 @@ body{margin:0;min-height:100dvh;overflow:hidden;color:var(--ink);font:15px/1.5 "
 .tube::after{content:"";position:absolute;inset:0;pointer-events:none;z-index:2;box-shadow:inset 0 0 18vmin rgba(0,0,0,.85)}
 .roll{position:absolute;left:0;right:0;height:22vh;top:-22vh;z-index:2;pointer-events:none;background:linear-gradient(180deg,transparent,rgba(255,255,255,.035),transparent)}
 .stage{position:relative;z-index:1;width:100%;max-width:360px;display:flex;flex-direction:column;align-items:center;text-align:center}
-.logo{width:min(320px,82vw);aspect-ratio:610/235;background:url(__YOUTH__) center/contain no-repeat;}
+.logo{display:block;width:min(320px,82vw);height:auto;aspect-ratio:610/235;overflow:visible}
 .word{margin-top:6px;font:600 11px/1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.42em;color:var(--ink-3);text-transform:uppercase;padding-left:.42em}
 form{width:100%;margin-top:30px;text-align:left}
 input[type=password]{width:100%;font:inherit;font-size:16px;color:var(--ink);background:var(--field);border:1px solid var(--line);border-radius:12px;padding:13px 14px;transition:border-color .18s,box-shadow .18s}
@@ -34,6 +34,8 @@ button:focus-visible{outline:2px solid #ffb36b;outline-offset:2px}
 .err{color:var(--bad);font-size:13px;min-height:20px;margin:10px 2px 0;text-align:center}
 ::selection{background:rgba(255,179,107,.3);color:inherit}
 .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+/* while writing, only the pen path shows; the full sign then lights on top */
+.pen path{stroke-dasharray:1 1;stroke-dashoffset:0}
 /* warm-up dot, like an old set's phosphor before the picture comes up */
 .dot{position:fixed;left:50%;top:50%;width:34vmin;height:28vmin;margin:-14vmin 0 0 -17vmin;border-radius:50%;z-index:3;pointer-events:none;opacity:0;
   background:radial-gradient(closest-side,#fff 0%,var(--phos) 45%,rgba(120,220,200,.55) 70%,rgba(20,40,120,.5) 86%,transparent 100%);filter:blur(1px)}
@@ -42,11 +44,11 @@ html.boot .tube{visibility:hidden}
 @media (prefers-reduced-motion:no-preference){
   .intro .dot{animation:dot 1.05s var(--ease) both}
   .intro .tube{animation:on .5s cubic-bezier(.3,.1,.2,1) .55s both}
-  .intro .logo{animation:flicker 1s steps(1) 1s both}
-  .intro .word{animation:fade .4s var(--ease) 1.5s both}
-  .intro form{animation:rise .45s var(--ease) 1.65s both}
+  .intro .pen path{animation:draw var(--d) cubic-bezier(.5,0,.5,1) calc(1.1s + var(--t)) both}
+  .intro .lit{animation:ignite .6s steps(1) 3.05s both}
+  .intro .word{animation:fade .4s var(--ease) 3.3s both}
+  .intro form{animation:rise .45s var(--ease) 3.45s both}
   .tube .roll{animation:roll 7s linear 2s infinite}
-  .tube .logo{animation-fill-mode:both}
   .idle .logo{animation:hum 9s steps(1) infinite}
   .leaving .tube{animation:off .42s cubic-bezier(.6,0,.8,.3) both}
   .leaving .dot{animation:dotOff .5s ease .36s both}
@@ -55,8 +57,9 @@ html.boot .tube{visibility:hidden}
 /* glow dot breathes, then squashes into the scan line */
 @keyframes dot{0%{opacity:0;transform:scale(.3)}25%{opacity:1;transform:scale(1)}45%{opacity:1;transform:scale(1.05,.95)}62%{opacity:1;transform:scale(2.6,.03)}80%{opacity:.9;transform:scale(4,.012)}100%{opacity:0;transform:scale(4,.012)}}
 @keyframes on{0%{transform:scale(1,.004);filter:brightness(6) saturate(0)}45%{transform:scale(1,.02);filter:brightness(4) saturate(.3)}100%{transform:none;filter:none}}
-@keyframes flicker{0%{opacity:0}8%{opacity:.85}12%{opacity:.1}20%{opacity:1;transform:translateX(3px) skewX(-4deg)}
-  24%{transform:translateX(-2px)}28%{opacity:.4;transform:none}34%{opacity:1}60%{opacity:.9}64%{opacity:1}100%{opacity:1}}
+@keyframes draw{from{stroke-dashoffset:1}to{stroke-dashoffset:0}}
+/* the written letters catch: the whole sign, glow and all, stutters on */
+@keyframes ignite{0%{opacity:0}12%{opacity:.8}20%{opacity:.15}34%{opacity:1}46%{opacity:.5}58%{opacity:1}100%{opacity:1}}
 @keyframes hum{0%,100%{opacity:1}93%{opacity:1}93.6%{opacity:.7;transform:translateX(1px)}94.2%{opacity:1;transform:none}}
 @keyframes roll{to{top:100vh}}
 @keyframes off{0%{transform:none;filter:none}55%{transform:scale(1,.006);filter:brightness(5)}100%{transform:scale(0,.006);filter:brightness(8)}}
@@ -69,7 +72,20 @@ html.boot .tube{visibility:hidden}
 <div class="dot" aria-hidden="true"></div>
 <div class="tube"><div class="roll" aria-hidden="true"></div>
 <main class="stage">
-  <div class="logo" role="img" aria-label="Youth"></div>
+  <svg class="logo" viewBox="0 0 610 235" role="img" aria-label="Youth">
+    <!-- the letters are written in: a hand-traced pen path through each stroke reveals the logo as it goes -->
+    <mask id="pen" maskUnits="userSpaceOnUse" x="0" y="0" width="610" height="235"><g class="pen" fill="none" stroke="#fff" stroke-width="48" stroke-linecap="round" stroke-linejoin="round">
+      <path pathLength="1" style="--t:0s;--d:.32s" d="M116,60 C74,78 50,108 66,125 C82,140 120,124 170,68"/>
+      <path pathLength="1" style="--t:.3s;--d:.2s" d="M164,64 L90,180"/>
+      <path pathLength="1" style="--t:.5s;--d:.38s" d="M240,70 A34,34 0 1,0 240.1,70"/>
+      <path pathLength="1" style="--t:.88s;--d:.3s" d="M298,60 L298,118 C298,162 366,162 368,118 L368,64"/>
+      <path pathLength="1" style="--t:1.16s;--d:.26s" d="M300,64 L506,64"/>
+      <path pathLength="1" style="--t:1.4s;--d:.14s" d="M408,66 L408,152"/>
+      <path pathLength="1" style="--t:1.52s;--d:.4s" d="M455,72 L455,150 M442,150 L520,52 C540,36 560,60 540,86 C528,106 536,130 540,152"/>
+    </g></mask>
+    <image class="ink" href="__YOUTH__" width="610" height="235" mask="url(#pen)"/>
+    <image class="lit" href="__YOUTH__" width="610" height="235"/>
+  </svg>
   <div class="word">Steward</div>
   <form id="f" autocomplete="on">
     <input type="text" name="username" value="steward" autocomplete="username" hidden>
@@ -102,7 +118,7 @@ async function derive(pw) {
   return crypto.subtle.deriveKey({ name: 'PBKDF2', salt: bytes(P.salt), iterations: P.iter, hash: 'SHA-256' }, base, { name: 'AES-GCM', length: 256 }, true, ['decrypt']);
 }
 // The opening plays only when a password is actually needed.
-function intro() { root.classList.remove('boot'); root.classList.add('intro'); setTimeout(() => { root.classList.add('idle'); document.getElementById('pw').focus({ preventScroll: true }); }, calm ? 0 : 2100); }
+function intro() { root.classList.remove('boot'); root.classList.add('intro'); setTimeout(() => { root.classList.add('idle'); document.getElementById('pw').focus({ preventScroll: true }); }, calm ? 0 : 3900); }
 (async () => {
   // A remembered key only works for the same build; a new password (or rebuild) asks again.
   try {
