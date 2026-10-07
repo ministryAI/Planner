@@ -36,7 +36,7 @@ const data = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv },
 const b64 = (u) => Buffer.from(u).toString('base64');
 
 const gate = readFileSync('tools/gate.html', 'utf8')
-  .replace('__YOUTH__', () => 'data:image/webp;base64,' + readFileSync('tools/youth.webp').toString('base64'))
+  .replaceAll('__YOUTH__', () => 'data:image/webp;base64,' + readFileSync('tools/youth.webp').toString('base64'))
   .replace('__PAYLOAD__', () => JSON.stringify({ v: 1, iter: ITER, salt: b64(salt), iv: b64(iv), data: b64(data) }));
 mkdirSync('dist', { recursive: true });
 writeFileSync('dist/index.html', gate);
