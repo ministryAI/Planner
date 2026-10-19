@@ -7,7 +7,8 @@ URL="${STEWARD_URL:-https://ministryai.github.io/Planner/}"
 up() { curl -s -m 2 "$1" >/dev/null; }
 
 # 1. Ollama (skipped when steward.env points the AI somewhere else). If one is already running, it is used as is.
-if ! grep -qE '^LLM_URL=https?://' "$DIR/steward.env" 2>/dev/null || grep -q ':11434' "$DIR/steward.env"; then
+LLM_LINE="$(grep -E '^LLM_URL=' "$DIR/steward.env" 2>/dev/null | tail -n 1)"  # the last LLM_URL line wins, as in the server
+if [ -z "$LLM_LINE" ] || echo "$LLM_LINE" | grep -q ':11434'; then
   if ! up http://127.0.0.1:11434/api/tags; then
     # Start Ollama's server directly (not the app), so its model folder is the one we choose. The server
     # decides where models live; the default is on this computer. Override with STEWARD_OLLAMA_MODELS.
