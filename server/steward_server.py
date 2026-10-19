@@ -27,10 +27,15 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 _env = HERE / "steward.env"
 if _env.exists():
+    # A setting listed twice: the last line wins, so a line added at the bottom takes effect.
+    # Variables already set in the shell still win over the file.
+    _file = {}
     for _line in _env.read_text().splitlines():
         if "=" in _line and not _line.lstrip().startswith("#"):
             k, v = _line.split("=", 1)
-            os.environ.setdefault(k.strip(), v.strip().strip('"'))
+            _file[k.strip()] = v.strip().strip('"')
+    for k, v in _file.items():
+        os.environ.setdefault(k, v)
 
 import httpx
 import uvicorn
@@ -215,7 +220,7 @@ async def chat(request: Request):
             res = await client.send(client.build_request("POST", LLM_URL, headers=headers, json={**payload, "model": model}), stream=True)
         except httpx.ConnectError:
             await client.aclose()
-            return JSONResponse({"error": "Ollama isn't running on this computer. Open the Ollama app and try again."}, status_code=502)
+            return JSONResponse({"error": "Couldn't reach the AI model at " + re.sub(r"^https?://([^/]+).*", r"\1", LLM_URL) + ". Check LLM_URL in steward.env and your internet connection."}, status_code=502)
         if res.status_code == 200:
             async def relay(res=res):
                 flt, buf = ThinkFilter(), ""
