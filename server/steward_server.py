@@ -9,6 +9,7 @@ Settings come from environment variables or a steward.env file next to this scri
   STEWARD_KEY   a long passphrase; enter the same one in Steward (required)
   MODEL         Ollama model name (default qwen3:32b); comma-separate to add fallbacks
   LLM_URL       OpenAI-compatible chat endpoint (default http://127.0.0.1:11434/v1/chat/completions)
+  LLM_THINKING  set to 0 to switch a local llama.cpp model's thinking off (e.g. Bonsai 2)
   STEWARD_HOME  folder for docs/ and data/ (default ~/Steward)
   PORT          default 8787 (HOST default 127.0.0.1; use Tailscale Serve for your phone)
 """
@@ -47,6 +48,9 @@ STEWARD_KEY = os.environ.get("STEWARD_KEY", "")
 MODELS = [m.strip() for m in os.environ.get("MODEL", "qwen3:32b").split(",") if m.strip()]
 LLM_URL = os.environ.get("LLM_URL", "http://127.0.0.1:11434/v1/chat/completions")
 LLM_KEY = os.environ.get("LLM_KEY", "")
+# LLM_THINKING=0: ask a llama.cpp-style server to skip the model's thinking step (Bonsai 2, Qwen3.5 and similar
+# read chat_template_kwargs). Leave it unset for hosted APIs such as Groq, which may reject the extra field.
+LLM_THINKING_OFF = os.environ.get("LLM_THINKING", "").strip().lower() in ("0", "false", "no", "off")
 # Talking to Ollama's own API lets the server keep the model loaded, give it enough context for Steward's
 # briefing, and switch Qwen3's thinking off properly. Any other endpoint uses the OpenAI format.
 OLLAMA = re.match(r"^(https?://[^/]+:11434)", LLM_URL)
@@ -212,6 +216,8 @@ async def chat(request: Request):
         "temperature": max(0.1, min(float(body.get("temperature", 0.6)), 1.5)),
         "stream": True,
     }
+    if LLM_THINKING_OFF:
+        payload["chat_template_kwargs"] = {"enable_thinking": False}
     headers = {"Content-Type": "application/json", **({"Authorization": f"Bearer {LLM_KEY}"} if LLM_KEY else {})}
     client = httpx.AsyncClient(timeout=httpx.Timeout(600, connect=10))
     last_error = "no models configured"
