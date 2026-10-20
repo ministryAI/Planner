@@ -71,7 +71,7 @@ async function kinSummarizeChat(msgs) {
   return points.length ? { id: uid(), at: msgs[0].at || Date.now(), topic, points } : null;
 }
 function recallConvos(state, text, limit = 3) {
-  return (state.convos || []).map((c) => ({ c, s: kinOverlap(text, c.topic + ' ' + c.points.join(' ')) })).filter((x) => x.s >= 0.15).sort((a, b) => b.s - a.s).slice(0, limit).map((x) => x.c);
+  return (state.convos || []).map((c) => ({ ...c, points: (c.points || []).filter((p) => !(typeof dianaOutage === 'function' && dianaOutage(p))) })).filter((c) => c.points.length && !(typeof dianaOutage === 'function' && dianaOutage(c.topic))).map((c) => ({ c, s: kinOverlap(text, c.topic + ' ' + c.points.join(' ')) })).filter((x) => x.s >= 0.15).sort((a, b) => b.s - a.s).slice(0, limit).map((x) => x.c);
 }
 
 /* ---------- UI (shown under Assistant → What I know) ---------- */

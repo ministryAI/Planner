@@ -294,6 +294,11 @@ function kinSystem(state, plan, userText) {
     + '\n\nPlanner snapshot:\n' + plannerSnapshot(state, plan, Date.now());
 }
 
+/* A failed turn: a connection error, or a reply that only says the server or model was unreachable. These are left out of
+   what Diana is sent (history, conversation summaries), so a small model doesn't take an old outage as today's fact. */
+const DIANA_OUTAGE = /\[Error:|(?:server|steward|model|ollama|connection)[^.\n]{0,40}(?:isn['’]?t|is not|wasn['’]?t|was not|not)\s+(?:responding|reachable|running|online|available)|(?:unable|can['’]?t|cannot|couldn['’]?t) (?:to )?reach (?:the |your )?(?:steward|server|model)|(?:until|when) (?:it|the server)(?:['’]s| is| comes)? back online|isn['’]?t downloaded\. Run: ollama/i;
+const dianaOutage = (t) => DIANA_OUTAGE.test(String(t || ''));
+
 /* Diana writes plain text; if a model slips into markdown anyway, show it without the symbols. */
 const kinPlain = (t) => String(t || '').replace(/^\s{0,3}#{1,6}\s+/gm, '').replace(/\*\*(.+?)\*\*/g, '$1').replace(/(^|\s)\*(\S[^*\n]*?)\*(?=\s|$|[.,!?])/g, '$1$2').replace(/^\s*---+\s*$/gm, '');
 
@@ -562,7 +567,7 @@ function AssistantView(ctx) {
   const msgsRef = useRef(msgs); msgsRef.current = msgs;
   const summarizing = useRef(false);
   const remember = async () => {
-    const todo = msgsRef.current.filter((m) => !m.pending && !m.summarized && m.content);
+    const todo = msgsRef.current.filter((m) => !m.pending && !m.summarized && m.content && !dianaOutage(m.content));
     if (summarizing.current || todo.filter((m) => m.role === 'user').length < 2 || !(typeof kinAIAvailable === 'function' && kinAIAvailable()) || prefs.learn === false) return;
     summarizing.current = true;
     try {
@@ -629,7 +634,7 @@ function AssistantView(ctx) {
         mail = found + (first && !/^No matching/.test(found) ? '\n\nFull conversation ' + first + ':\n' + await agentEmailTool('email_thread', { ref: first }, refs) : '');
       }
       const base = kinSystem(state, plan, text) + (ci ? '\n\n' + ci.block : '') + (mail ? '\n\nWORK EMAIL (looked up by Steward for this message; read-only, you cannot send):\n' + mail : '')
-        + (compact && compact.points.length ? '\n\nEarlier in this conversation:\n' + compact.points.map((p) => '- ' + p).join('\n') : '')
+        + (compact && compact.points.filter((p) => !dianaOutage(p)).length ? '\n\nEarlier in this conversation:\n' + compact.points.filter((p) => !dianaOutage(p)).map((p) => '- ' + p).join('\n') : '')
         + (mode === 'plan' ? '\n\nPLAN-ONLY MODE: the user has turned off changes. Never include an actions block; describe what you would change in words.' : '');
       // The guard and the lookups apply to this request only; the stored chat stays exactly as said.
       const { system, history, meta } = guardRequest({ msgs: prior, text, baseSystem: base, variant: guardVariant(), state, plan, refs });

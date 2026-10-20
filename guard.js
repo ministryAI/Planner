@@ -66,7 +66,10 @@ const guardPrefetchBlock = (pf) => (pf.length ? '\n\nPREFETCHED STEWARD CONTEXT 
 
 /* Builds one request. msgs: the conversation before this message (as stored); text: the new user message. */
 function guardRequest({ msgs, text, baseSystem, variant, state, plan, refs }) {
-  const clean = msgs.filter((m) => !m.pending && m.content);
+  // A failed turn (an error, or a reply saying the server was down) is dropped with the message that prompted it.
+  const failed = new Set();
+  msgs.forEach((m, i) => { if (m.role === 'assistant' && typeof dianaOutage === 'function' && dianaOutage(m.content)) { failed.add(i); if (i > 0 && msgs[i - 1].role === 'user') failed.add(i - 1); } });
+  const clean = msgs.filter((m, i) => !m.pending && m.content && !failed.has(i));
   const depth = guardDepth(clean);
   const fired = variant !== 'current' && depth >= 2;
   const recent = clean.slice(-4).map((m) => m.content).join(' ').slice(-2000);
