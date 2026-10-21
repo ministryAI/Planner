@@ -294,6 +294,11 @@ function kinSystem(state, plan, userText) {
     + '\n\nPlanner snapshot:\n' + plannerSnapshot(state, plan, Date.now());
 }
 
+/* A failed turn: a connection error, or a reply that only says the server or model was unreachable. These are left out of
+   what Diana is sent (history, conversation summaries), so a small model doesn't take an old outage as today's fact. */
+const DIANA_OUTAGE = /\[Error:|(?:server|steward|model|ollama|connection)[^.\n]{0,40}(?:isn['’]?t|is not|wasn['’]?t|was not|not)\s+(?:responding|reachable|running|online|available)|(?:unable|can['’]?t|cannot|couldn['’]?t) (?:to )?reach (?:the |your )?(?:steward|server|model)|(?:until|when) (?:it|the server)(?:['’]s| is| comes)? back online|isn['’]?t downloaded\. Run: ollama/i;
+const dianaOutage = (t) => DIANA_OUTAGE.test(String(t || ''));
+
 /* Diana writes plain text; if a model slips into markdown anyway, show it without the symbols. */
 const kinPlain = (t) => String(t || '').replace(/^\s{0,3}#{1,6}\s+/gm, '').replace(/\*\*(.+?)\*\*/g, '$1').replace(/(^|\s)\*(\S[^*\n]*?)\*(?=\s|$|[.,!?])/g, '$1$2').replace(/^\s*---+\s*$/gm, '');
 
@@ -507,9 +512,12 @@ async function kinExtractNote(note, state) {
 /* Opening Diana from a task or project: the context travels as data (type + id), not as words put in the
  * user's mouth. Diana gets the facts about it for each message until the user clears it. */
 const DIANA_CTX_KEY = 'steward.diana.ctx.v1';
+/* Opens Diana about something on the current page: a floating chat over the page when the app provides one,
+ * otherwise the Diana page. */
 function openDiana(setView, context, question) {
   kinSave(DIANA_CTX_KEY, { ...context, at: Date.now(), question: question || null });
-  setView('assistant');
+  if (typeof window.dianaFloat === 'function') window.dianaFloat();
+  else setView('assistant');
 }
 function dianaContextInfo(c, state, plan) {
   if (!c) return null;
@@ -562,7 +570,7 @@ function AssistantView(ctx) {
   const msgsRef = useRef(msgs); msgsRef.current = msgs;
   const summarizing = useRef(false);
   const remember = async () => {
-    const todo = msgsRef.current.filter((m) => !m.pending && !m.summarized && m.content);
+    const todo = msgsRef.current.filter((m) => !m.pending && !m.summarized && m.content && !dianaOutage(m.content));
     if (summarizing.current || todo.filter((m) => m.role === 'user').length < 2 || !(typeof kinAIAvailable === 'function' && kinAIAvailable()) || prefs.learn === false) return;
     summarizing.current = true;
     try {
@@ -629,7 +637,7 @@ function AssistantView(ctx) {
         mail = found + (first && !/^No matching/.test(found) ? '\n\nFull conversation ' + first + ':\n' + await agentEmailTool('email_thread', { ref: first }, refs) : '');
       }
       const base = kinSystem(state, plan, text) + (ci ? '\n\n' + ci.block : '') + (mail ? '\n\nWORK EMAIL (looked up by Steward for this message; read-only, you cannot send):\n' + mail : '')
-        + (compact && compact.points.length ? '\n\nEarlier in this conversation:\n' + compact.points.map((p) => '- ' + p).join('\n') : '')
+        + (compact && compact.points.filter((p) => !dianaOutage(p)).length ? '\n\nEarlier in this conversation:\n' + compact.points.filter((p) => !dianaOutage(p)).map((p) => '- ' + p).join('\n') : '')
         + (mode === 'plan' ? '\n\nPLAN-ONLY MODE: the user has turned off changes. Never include an actions block; describe what you would change in words.' : '');
       // The guard and the lookups apply to this request only; the stored chat stays exactly as said.
       const { system, history, meta } = guardRequest({ msgs: prior, text, baseSystem: base, variant: guardVariant(), state, plan, refs });
@@ -681,24 +689,28 @@ function AssistantView(ctx) {
   useEffect(() => { if (kinAI.status === 'error' && pendingText) { setInput(pendingText); setPending(null); } }, [kinAI.status]);
   const pats = learnedPatterns(state);
   const m = kinAI.model;
-  return html`<div class="dws">
+  const mini = !!ctx.mini;
+  const goSettings = () => { if (mini && ctx.onClose) ctx.onClose(); ctx.setView('settings'); setTimeout(() => { const el = document.getElementById('diana-settings'); el && el.scrollIntoView({ block: 'start' }); }, 60); };
+  return html`<div class=${'dws' + (mini ? ' dws-mini' : '')}>
     <header class="dws-head">
       <div class="dws-title"><${Icon} n="diana" cls="diana-mark" /><h1>Diana</h1></div>
-      <span class="dws-status" title=${ready ? (m ? m.name : '') : ''}><i class=${ready ? 'on' : kinAI.status === 'loading' ? 'busy' : ''}></i>${ready ? (kinAI.device === 'cloud' ? 'Local' : 'On this device') + (m && m.name ? ' · ' + m.name : '') : kinAI.status === 'loading' ? 'Loading…' : 'Not connected'}</span>
+      <span class="dws-status" title=${ready ? (m ? m.name : '') : ''} hidden=${mini}><i class=${ready ? 'on' : kinAI.status === 'loading' ? 'busy' : ''}></i>${ready ? (kinAI.device === 'cloud' ? 'Local' : 'On this device') + (m && m.name ? ' · ' + m.name : '') : kinAI.status === 'loading' ? 'Loading…' : 'Not connected'}</span>
       <span style=${{ flex: 1 }}></span>
       <div class="dws-menu">
         <button class="btn sm ghost" aria-haspopup="menu" aria-expanded=${menu} onClick=${() => setMenu(!menu)} aria-label="More">···</button>
         ${menu ? html`<div class="dws-pop" role="menu" onMouseLeave=${() => setMenu(false)}>
           <button role="menuitem" disabled=${busy || !msgs.length} onClick=${async () => { setMenu(false); await remember(); setMsgs([]); setAdded({}); try { localStorage.removeItem(KIN_COMPACT_KEY); } catch (e) {} }}>Clear chat</button>
-          <button role="menuitem" onClick=${() => { setMenu(false); ctx.setView('settings'); setTimeout(() => { const el = document.getElementById('diana-settings'); el && el.scrollIntoView({ block: 'start' }); }, 60); }}>Diana settings</button>
+          <button role="menuitem" onClick=${() => { setMenu(false); goSettings(); }}>Diana settings</button>
         </div>` : null}
       </div>
+      ${mini ? html`<button class="btn sm ghost dws-x" onClick=${() => { ctx.onClose && ctx.onClose(); ctx.setView('assistant'); }} title="Open the full Diana page" aria-label="Open the full Diana page">⤢</button>
+        <button class="btn sm ghost dws-x" onClick=${() => ctx.onClose && ctx.onClose()} title="Close" aria-label="Close Diana">×</button>` : null}
     </header>
     <div class="dws-scroll" ref=${scrollRef} onScroll=${onScroll} aria-live="polite">
       <div class="dws-col">
         ${!msgs.length && !pendingText ? html`<div class="dws-empty">
           <p>${ci ? 'Ask Diana about ' + ci.label.replace(/^(Project|Task|Decision): /, '') + '.' : 'Ask Diana about your plans, or tell her about yourself: your work, routines and goals. She remembers what matters.'}</p>
-          ${!ready && !kinCloudAvailable() ? html`<p class="small muted">Diana isn’t connected yet. <button class="btn sm ghost" onClick=${() => ctx.setView('settings')}>Connect in Settings</button></p>` : null}
+          ${!ready && !kinCloudAvailable() ? html`<p class="small muted">Diana isn’t connected yet. <button class="btn sm ghost" onClick=${goSettings}>Connect in Settings</button></p>` : null}
         </div>` : null}
         ${msgs.map((x) => html`<div key=${x.id} class=${'dmsg ' + (x.role === 'user' ? 'user' : 'diana')}>
           <div class="who">${x.role === 'user' ? html`<span class="diana-label">You</span>` : html`<${Icon} n="diana" cls="diana-mark" /><span class="diana-label">Diana</span>`}</div>
@@ -707,9 +719,8 @@ function AssistantView(ctx) {
           ${x.role === 'assistant' && !x.pending && (x.actions || []).length ? html`<${ActionCard} x=${x} state=${state} A=${A} patch=${patch} />` : null}
           ${x.role === 'assistant' && !x.pending ? chatTaskLines(x.content).map((line, i) => { const k = x.id + ':' + i; return html`<div key=${k} style=${{ display: 'flex', gap: '8px', alignItems: 'center', marginTop: '6px' }}><button class="btn sm" disabled=${added[k]} onClick=${() => addLine(k, line)}>${added[k] ? 'Added' : '+ Add'}</button><span class="small">${line}</span></div>`; }) : null}
           ${x.note ? html`<div class="small" style=${{ marginTop: '6px', color: 'var(--warn)' }}>${x.note}</div>` : null}
-          ${x.learned ? html`<div class="small muted" style=${{ marginTop: '6px' }}>Learned: ${x.learned.join(' · ')} <button class="btn sm ghost" onClick=${() => { ctx.setView('settings'); setTimeout(() => { const el = document.getElementById('diana-settings'); el && el.scrollIntoView({ block: 'start' }); }, 60); }}>Review</button></div>` : null}
+          ${x.learned ? html`<div class="small muted" style=${{ marginTop: '6px' }}>Learned: ${x.learned.join(' · ')} <button class="btn sm ghost" onClick=${goSettings}>Review</button></div>` : null}
         </div>`)}
-        ${pendingText ? html`<div class="dmsg user"><div class="who"><span class="diana-label">You</span></div><div class="body">${pendingText}</div><div class="small muted" style=${{ marginTop: '4px' }}>Diana is loading and will reply when she’s ready…</div></div>` : null}
         ${pendingText ? html`<div class="dmsg user"><div class="who"><span class="diana-label">You</span></div><div class="body">${pendingText}</div><div class="small muted" style=${{ marginTop: '4px' }}>Diana is loading and will reply when she’s ready…</div></div>` : null}
       </div>
     </div>
@@ -720,7 +731,7 @@ function AssistantView(ctx) {
         <div class=${'diana-bar diana-composer' + (thinking ? ' is-thinking' : '')}><div class="diana-bar-glass">
         <form class="dc-row" onSubmit=${(e) => { e.preventDefault(); send(); }}>
           <${Icon} n="diana" cls="diana-mark" />
-          <input value=${input} onInput=${(e) => setInput(e.target.value)} placeholder=${ready ? (ci ? 'Ask Diana about this…' : 'Ask Diana anything, or tell her about yourself…') : 'Type a message — Diana will answer as soon as she’s loaded'} aria-label="Message Diana" autocomplete="off" />
+          <input value=${input} onInput=${(e) => setInput(e.target.value)} placeholder=${mini ? (ci ? 'Ask about this…' : 'Ask Diana…') : ready ? (ci ? 'Ask Diana about this…' : 'Ask Diana anything, or tell her about yourself…') : 'Type a message — Diana will answer as soon as she’s loaded'} aria-label="Message Diana" autocomplete="off" />
           ${busy ? html`<button class="btn sm" type="button" onClick=${() => kinAI.stop()}>Stop</button>` : input.trim() ? html`<button class="btn pri sm" type="submit">Send</button>` : html`<kbd aria-hidden="true">↵</kbd>`}
         </form>
           <div class="dc-tools">
