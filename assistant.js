@@ -512,6 +512,18 @@ async function kinExtractNote(note, state) {
 /* Opening Diana from a task or project: the context travels as data (type + id), not as words put in the
  * user's mouth. Diana gets the facts about it for each message until the user clears it. */
 const DIANA_CTX_KEY = 'steward.diana.ctx.v1';
+/* Diana's notes in the user's Obsidian vault, kept by the Steward server (STEWARD_VAULT). Writes are best-effort:
+ * a failed write never interrupts the chat. */
+const vaultOn = () => { const sp = typeof kinSpace === 'function' ? kinSpace() : null; return !!(sp && sp.features && sp.features.includes('vault')); };
+async function vaultPost(path, body) {
+  const sp = kinSpace();
+  const r = await fetch(sp.url + path, { method: 'POST', headers: { Authorization: 'Bearer ' + sp.key, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || 'vault error ' + r.status);
+  return j;
+}
+const firstSentence = (t) => (String(t || '').replace(/\s+/g, ' ').trim().match(/^.{0,220}?[.!?](?=\s|$)/) || [String(t || '').slice(0, 200)])[0];
+
 /* Opens Diana about something on the current page: a floating chat over the page when the app provides one,
  * otherwise the Diana page. */
 function openDiana(setView, context, question) {
@@ -643,6 +655,8 @@ function AssistantView(ctx) {
       const { system, history, meta } = guardRequest({ msgs: prior, text, baseSystem: base, variant: guardVariant(), state, plan, refs });
       const r = await agentRun({ system, history, state, plan, refs, onStep: (steps) => patch(id, () => ({ steps: steps.map((x) => x.tool) })), onText: (t) => patch(id, () => ({ content: t })) });
       reply = r.text;
+      // The daily log in the vault. Work email stays out of it: the vault may sync to iCloud.
+      if (vaultOn() && reply && !dianaOutage(reply)) vaultPost('/v1/vault/log', { lines: [mail || (r.steps || []).some((x) => /^email_/.test(x.tool || x)) ? 'Talked about work email (details kept out of the vault).' : 'You: ' + text.replace(/\s+/g, ' ').slice(0, 160) + ' · Diana: ' + firstSentence(kinPlain(chatActions(reply).clean))] }).catch(() => {});
       const fakeBlock = /\[proposed changes\]/i.test(reply);
       let acts = mode === 'plan' ? [] : chatActions(reply).actions;
       // She said she'd change something, or the user asked for one, but no changes came back: ask separately, once.
@@ -668,7 +682,7 @@ function AssistantView(ctx) {
     } catch (e) { patch(id, (x) => ({ content: (e.partial || x.content) + '\n[Error: ' + e.message + ']', pending: false })); return; }
     if (msgsRef.current.filter((m) => !m.summarized && m.role === 'user').length >= 6) remember();
     if (prefs.learn || /^\s*(please\s+)?remember\b/i.test(text)) {
-      try { const learned = await kinLearnFrom(text, reply); if (learned.length) patch(id, () => ({ learned: learned.map((m) => m.text) })); } catch (e) {}
+      try { const learned = await kinLearnFrom(text, reply); if (learned.length) { patch(id, () => ({ learned: learned.map((m) => m.text) })); if (vaultOn()) vaultPost('/v1/vault/remember', { facts: learned.map((m) => m.text) }).catch(() => {}); } } catch (e) {}
     }
   };
   const addDoc = async (f) => {
@@ -949,6 +963,7 @@ function MemoryPanel({ prefs, setPrefs, pats, setToast }) {
         <button class="btn sm ghost" onClick=${() => kinMem.remove(m.id)} aria-label="Forget this">Forget</button>
       </div>`)}</div>
       <div style=${{ padding: '12px 16px', display: 'flex', gap: '8px', flexWrap: 'wrap', borderTop: '1px solid var(--line)' }}>
+        ${vaultOn() ? html`<button class="btn sm" disabled=${!kinMem.items.length} onClick=${() => vaultPost('/v1/vault/remember', { facts: kinMem.items.map((m) => m.text), source: 'Steward memory' }).then((j) => setToast({ text: j.added ? 'Copied ' + j.added + ' fact' + (j.added === 1 ? '' : 's') + ' to ' + j.file : 'Everything here is already in Obsidian', id: uid() })).catch((e) => setToast({ text: e.message, id: uid() }))}>Copy to Obsidian</button>` : null}
         <button class="btn sm" onClick=${exportMem} disabled=${!kinMem.items.length}>Back up memory</button>
         <button class="btn sm" onClick=${() => fileRef.current.click()}>Restore from file</button>
         <input ref=${fileRef} type="file" accept=".json,application/json" hidden onChange=${(e) => { importMem(e.target.files[0]); e.target.value = ''; }} />
