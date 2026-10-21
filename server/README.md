@@ -55,6 +55,16 @@ The server reads the feed (at most every 20 minutes) and keeps the last good cop
 ## Work email (Outlook, read-only)
 If Power Automate writes Inbox + Sent previews to OneDrive as `diana-email.json` with a view-only link, add `DIANA_WORK_EMAIL_FEED_URL=` followed by that link to `steward.env` and restart. The server groups messages into conversations, works out who spoke last and whether you replied, how long someone has been waiting, internal vs external (`DIANA_WORK_EMAIL_DOMAINS`, default salvationarmy.org), and automated mail vs a person. Diana uses that to tell you who is waiting on you and to draft replies for you to copy. She can't send email. The snapshot is cached in `data/work-email.json` (readable only by your account) and the last good copy is kept if a read fails.
 
+## Diana's notes in Obsidian (optional)
+Add `STEWARD_VAULT=` followed by the full path of your Obsidian vault to `steward.env` and restart. Diana gets a `Diana` folder in the vault:
+- `DIANA.md`: her standing instructions. Edit them freely; they're sent with every message.
+- `about-me.md` and `facts.md`: lasting facts about you, sent with every message. Delete a line to make her forget it.
+- `people/<Name>.md`: one page per person.
+- `memory/YYYY-MM-DD.md`: a daily log, one line per exchange. Work email details are left out.
+- `guides/`: how this works. It's rewritten on every start, so edits there don't stick.
+
+She only writes inside her folder. Add `DIANA_VAULT_READ=1` to let her also look things up in the rest of your vault. If the vault syncs (iCloud, Google Drive), everything in it leaves this computer, so keep work-sensitive notes out of it.
+
 ## Updating the server
 When Steward gets a new server feature, run this once in Terminal. It downloads the new server file and stops the old server:
 ```

@@ -63,6 +63,73 @@ DATA_FILE = HOME / "data" / "steward.json"
 DOCS_DIR.mkdir(parents=True, exist_ok=True)
 DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
 
+# ---------- Diana's notes in an Obsidian vault (optional) ----------
+# STEWARD_VAULT points at the vault; Diana keeps her own notes in DIANA_FOLDER inside it (default "Diana"):
+#   DIANA.md (her instructions, yours to edit) · about-me.md · facts.md · people/<Name>.md · memory/YYYY-MM-DD.md (daily log)
+#   guides/ (how Steward works; rewritten on every start, so edits there don't stick).
+# She only writes inside her folder. DIANA_VAULT_READ=1 also lets her look things up in the rest of the vault.
+VAULT = Path(os.path.expanduser(os.environ.get("STEWARD_VAULT", "").strip())) if os.environ.get("STEWARD_VAULT", "").strip() else None
+VAULT_DIR = (VAULT / os.environ.get("DIANA_FOLDER", "Diana").strip().strip("/")) if VAULT else None
+VAULT_READ_ALL = os.environ.get("DIANA_VAULT_READ", "").strip().lower() in ("1", "true", "yes", "on")
+VAULT_ERROR = ""
+
+DIANA_MD = """# Diana
+
+These are Diana's standing instructions. Edit them freely; Steward reads this file with every message.
+
+- Talk like a thoughtful colleague: plain sentences, no markdown headings or bold.
+- Steward works out the facts (dates, who wrote last, what's scheduled). Diana works out what they mean.
+- Never send email or messages. Draft replies for me to copy.
+- Ask before changing anything in my planner.
+- Check-ins should be occasional and kind, never a performance review.
+"""
+
+GUIDE_MD = """# How Diana's notes work
+
+This guide ships with Steward and is rewritten each time the server starts, so edits here don't stick.
+
+- DIANA.md holds Diana's standing instructions. Steward sends it with every message.
+- about-me.md and facts.md hold lasting facts about the user. Steward sends them with every message, so keep them short.
+  To make Diana forget something, delete the line.
+- people/<Name>.md holds one page per person. A page is used when that person comes up.
+- memory/YYYY-MM-DD.md is the daily log: one line per exchange, added automatically. Work email details are left out.
+- Notes elsewhere in the vault are only read when DIANA_VAULT_READ=1 is set in steward.env. Diana never writes outside this folder.
+"""
+
+
+def _vault_setup():
+    global VAULT_ERROR
+    if not VAULT:
+        return
+    try:
+        if not VAULT.is_dir():
+            raise FileNotFoundError(f"{VAULT} isn't a folder")
+        for sub in ("memory", "people", "guides"):
+            (VAULT_DIR / sub).mkdir(parents=True, exist_ok=True)
+        if not (VAULT_DIR / "DIANA.md").exists():
+            (VAULT_DIR / "DIANA.md").write_text(DIANA_MD, encoding="utf-8")
+        if not (VAULT_DIR / "facts.md").exists():
+            (VAULT_DIR / "facts.md").write_text("# Facts\n\nLasting facts and preferences. Delete a line to make Diana forget it.\n\n", encoding="utf-8")
+        if not (VAULT_DIR / "about-me.md").exists() and (DOCS_DIR / "about-me.md").exists():
+            (VAULT_DIR / "about-me.md").write_text((DOCS_DIR / "about-me.md").read_text(encoding="utf-8", errors="ignore"), encoding="utf-8")
+        (VAULT_DIR / "guides" / "diana-notes.md").write_text(GUIDE_MD, encoding="utf-8")
+        VAULT_ERROR = ""
+    except Exception as e:
+        VAULT_ERROR = str(e)
+        print("Vault not available:", e)
+
+
+def _vault_text(name, limit):
+    """A note's text, trimmed from the top (the newest lines are usually at the bottom)."""
+    try:
+        t = (VAULT_DIR / name).read_text(encoding="utf-8", errors="ignore").strip()
+    except Exception:
+        return ""
+    return t if len(t) <= limit else "…" + t[-limit:]
+
+
+_vault_setup()
+
 app = FastAPI(title="Steward")
 # Steward is served from GitHub Pages, so it calls this server cross-origin. The Steward key is what
 # protects it; the server also only listens on this computer unless you change HOST.
@@ -102,7 +169,24 @@ def _load_chunks():
             piece = text[i:i + 1000]
             if piece:
                 chunks.append({"source": path.name, "text": piece, "terms": _terms(piece), "name_terms": _terms(re.sub(r"[_().\d-]+", " ", path.stem))})
-    print(f"Loaded {len(chunks)} passages from {DOCS_DIR}")
+    # Diana's notes (daily logs, people pages) and, if allowed, the rest of the vault. DIANA.md and facts are sent whole.
+    if VAULT_DIR and VAULT_DIR.is_dir():
+        roots = [VAULT] if VAULT_READ_ALL else [VAULT_DIR]
+        always = {"DIANA.md", "facts.md", "about-me.md"}
+        for root in roots:
+            for path in sorted(root.rglob("*.md")):
+                rel = path.relative_to(VAULT)
+                if any(part.startswith(".") for part in rel.parts) or (path.parent == VAULT_DIR and path.name in always):
+                    continue
+                try:
+                    text = re.sub(r"\s+", " ", path.read_text(encoding="utf-8", errors="ignore")).strip()
+                except Exception:
+                    continue
+                for i in range(0, len(text), 900):
+                    piece = text[i:i + 1000]
+                    if piece:
+                        chunks.append({"source": "Obsidian: " + str(rel.with_suffix("")), "text": piece, "terms": _terms(piece), "name_terms": _terms(re.sub(r"[_().\d-]+", " ", path.stem))})
+    print(f"Loaded {len(chunks)} passages from {DOCS_DIR}" + (f" and {VAULT_DIR}" if VAULT_DIR else ""))
     return chunks
 
 
@@ -149,7 +233,7 @@ def _authorized(request: Request) -> bool:
 @app.get("/health")
 def health():
     return {"ok": True, "configured": bool(STEWARD_KEY), "documents": len({c["source"] for c in CHUNKS}), "models": MODELS,
-            "features": ["sync", "calendar", "events", "docs"] + (["workcal"] if WORK_FEED_URL else []) + (["email"] if MAIL_FEED_URL else []), "sync": str(DATA_FILE), "server": "local"}
+            "features": ["sync", "calendar", "events", "docs"] + (["workcal"] if WORK_FEED_URL else []) + (["email"] if MAIL_FEED_URL else []) + (["vault"] if VAULT_DIR and not VAULT_ERROR else []), "sync": str(DATA_FILE), "server": "local"}
 
 
 class ThinkFilter:
@@ -200,6 +284,11 @@ async def chat(request: Request):
     if passages:
         docs = "\n\n".join(f"[{p['source']}] {p['text']}" for p in passages)
         note += "\n\nRelevant passages from the user's documents (cite the file name when you use them):\n" + docs
+    if VAULT_DIR and use_docs and not VAULT_ERROR:
+        own = [("Your standing instructions (DIANA.md, written by the user; follow them)", _vault_text("DIANA.md", 2500)),
+               ("About the user (about-me.md)", _vault_text("about-me.md", 3000)),
+               ("Lasting facts you have saved (facts.md)", _vault_text("facts.md", 2500))]
+        note += "".join(f"\n\n{title}:\n{text}" for title, text in own if text)
     if messages[0]["role"] == "system":
         messages[0] = {"role": "system", "content": str(messages[0]["content"]) + note}
     elif note:
@@ -507,6 +596,87 @@ async def docs_remove(name: str, request: Request):
         _reload_docs()
     return {"ok": True}
 
+
+
+# ---------- Diana's notes (Obsidian vault) ----------
+def _vault_ready(request):
+    if not _authorized(request):
+        return JSONResponse({"error": "Wrong Steward key."}, status_code=401)
+    if not VAULT_DIR:
+        return JSONResponse({"error": "No vault set. Add STEWARD_VAULT= to steward.env and restart."}, status_code=404)
+    if VAULT_ERROR:
+        return JSONResponse({"error": "Vault not available: " + VAULT_ERROR}, status_code=503)
+    return None
+
+
+def _clean_line(text, limit=400):
+    return re.sub(r"\s+", " ", str(text or "")).strip()[:limit]
+
+
+def _append(path: Path, lines, header=""):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    new = not path.exists()
+    with path.open("a", encoding="utf-8") as f:
+        if new and header:
+            f.write(header)
+        f.write("".join(line + "\n" for line in lines))
+
+
+def _today():
+    return time.strftime("%Y-%m-%d")
+
+
+@app.get("/v1/vault/status")
+async def vault_status(request: Request):
+    if not _authorized(request):
+        return JSONResponse({"error": "Wrong Steward key."}, status_code=401)
+    if not VAULT_DIR:
+        return {"configured": False}
+    def count(sub):
+        try:
+            return len(list((VAULT_DIR / sub).glob("*.md")))
+        except Exception:
+            return 0
+    facts = _vault_text("facts.md", 100000)
+    return {"configured": True, "error": VAULT_ERROR or None, "folder": str(VAULT_DIR), "read_all": VAULT_READ_ALL,
+            "facts": sum(1 for l in facts.splitlines() if l.startswith("- ")), "people": count("people"), "days": count("memory")}
+
+
+@app.post("/v1/vault/log")
+async def vault_log(request: Request):
+    """Adds lines to today's log, memory/YYYY-MM-DD.md. Only ever appends."""
+    bad = _vault_ready(request)
+    if bad:
+        return bad
+    body = await request.json()
+    lines = [_clean_line(x) for x in (body.get("lines") or []) if _clean_line(x)][:10]
+    if lines:
+        day = _today()
+        _append(VAULT_DIR / "memory" / f"{day}.md", [f"- {time.strftime('%H:%M')} {l}" for l in lines], f"# {day}\n\n")
+    return {"ok": True, "added": len(lines)}
+
+
+@app.post("/v1/vault/remember")
+async def vault_remember(request: Request):
+    """Saves lasting facts to facts.md, or to people/<Name>.md when a person is given, with a link to today's log."""
+    bad = _vault_ready(request)
+    if bad:
+        return bad
+    body = await request.json()
+    facts = [_clean_line(x, 300) for x in (body.get("facts") or []) if len(_clean_line(x)) >= 4][:50]
+    person = re.sub(r"[^\w .'-]+", "", str(body.get("person") or "")).strip()[:60]
+    src = body.get("source") or f"[[{VAULT_DIR.name}/memory/{_today()}|{_today()}]]"
+    if not facts:
+        return {"ok": True, "added": 0}
+    target = VAULT_DIR / "people" / f"{person}.md" if person else VAULT_DIR / "facts.md"
+    have = target.read_text(encoding="utf-8", errors="ignore").lower() if target.exists() else ""
+    new = []
+    for f in facts:
+        if f.lower() not in have:
+            new.append(f); have += "\n" + f.lower()
+    _append(target, [f"- {f} (from {src})" for f in new], f"# {person}\n\n" if person else "")
+    _reload_docs()
+    return {"ok": True, "added": len(new), "file": str(target.relative_to(VAULT))}
 
 @app.get("/v1/events")
 async def events_get(request: Request, since: int = 0, limit: int = 2000):
