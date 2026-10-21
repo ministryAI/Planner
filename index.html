@@ -597,7 +597,7 @@ select.ghostin{text-align-last:right}
 @media (max-width:860px){.dws{margin:-6px -8px 0;border-radius:20px 20px 0 0}.dws-head{padding:12px 16px 8px}.dws-col{padding:0 12px}.dws-foot{padding-bottom:12px}.dws-empty{padding-top:6vh}}
 
 /* ================= Soft gray workspace =================
- * A dark icon dock, a frosted sidebar and a frosted main panel on soft gray. Surfaces are lit from the top
+ * A dark icon dock and a frosted main panel on soft gray. Surfaces are lit from the top
  * (white top edge, soft drop shadow) instead of drawn with lines. Diana keeps her dark glass. */
 :root{
   --ground:#b4b4b2; --surface:#d3d3d1; --sunk:rgba(0,0,0,.055); --line:rgba(0,0,0,.09); --line-2:rgba(0,0,0,.15);
@@ -624,9 +624,9 @@ body{background:radial-gradient(120% 90% at 20% 0%,#c4c4c2 0%,#b4b4b2 45%,#a7a7a
 .cmd:focus-within{border-style:solid;border-color:rgba(0,0,0,.3);background:rgba(255,255,255,.45)}
 .in,input.in,select.in,textarea.in{background:rgba(255,255,255,.32);border-color:rgba(0,0,0,.12)}
 
-/* layout: dock · sidebar · main */
+/* layout: dock · main */
 @media (min-width:861px){
-  .app{grid-template-columns:auto 256px minmax(0,1fr);gap:14px;padding:14px}
+  .app{grid-template-columns:auto minmax(0,1fr);gap:14px;padding:14px}
   .dock{border:0;padding:6px;border-radius:30px;background:rgba(255,255,255,.16);box-shadow:inset 0 1px 0 rgba(255,255,255,.45),0 16px 30px -24px rgba(0,0,0,.5);align-items:center;gap:12px;width:76px}
   .dock-pill{width:64px;display:flex;flex-direction:column;align-items:center;gap:6px;padding:12px 0 14px;border-radius:24px;background:linear-gradient(180deg,#2d2d2f,#1b1b1d);box-shadow:inset 0 1px 0 rgba(255,255,255,.12),0 16px 28px -14px rgba(0,0,0,.65)}
   .dock .brand{padding:6px 0 12px;margin-bottom:6px;border-bottom:1px solid rgba(255,255,255,.1);width:36px;justify-content:center}
@@ -639,29 +639,9 @@ body{background:radial-gradient(120% 90% at 20% 0%,#c4c4c2 0%,#b4b4b2 45%,#a7a7a
   .dock-tag{writing-mode:vertical-rl;transform:rotate(180deg);font:500 10px var(--f-mono);letter-spacing:.32em;color:rgba(0,0,0,.32);padding:18px 0 8px;border-top:1px solid rgba(0,0,0,.08)}
   .dock .dock-gear{width:58px;height:58px;border-radius:18px;background:linear-gradient(180deg,#2d2d2f,#1b1b1d);color:#e7e7e4;box-shadow:inset 0 1px 0 rgba(255,255,255,.12),0 14px 24px -12px rgba(0,0,0,.6)}
   .dock .dock-gear.on,.dock .dock-gear:hover{color:#fff;background:linear-gradient(180deg,#3a3a3c,#1f1f21)}
-  .side{display:flex;flex-direction:column;gap:2px;overflow-y:auto;padding:20px 14px;border-radius:26px;background:var(--glass);box-shadow:var(--shadow);min-height:0}
   .main{border-radius:26px;background:linear-gradient(180deg,rgba(255,255,255,.2),rgba(255,255,255,.07));box-shadow:inset 0 1px 0 rgba(255,255,255,.55),inset 0 0 0 1px rgba(255,255,255,.2),0 22px 44px -30px rgba(0,0,0,.5)}
   .wrap{padding-inline:36px;padding-block:30px 90px}
 }
-.side{display:none}
-@media (min-width:861px){.side{display:flex}}
-.side-me{display:flex;align-items:center;gap:12px;padding:2px 6px 16px}
-.side-av{width:42px;height:42px;letter-spacing:.02em;border-radius:50%;flex:none;display:grid;place-items:center;font:500 17px var(--f-body);color:#f1f1ef;background:radial-gradient(circle at 35% 30%,#4a4a4d,#1a1a1c);box-shadow:0 0 0 3px rgba(255,255,255,.35),0 8px 16px -8px rgba(0,0,0,.6)}
-.side-me b{display:block;font:500 16px/1.2 var(--f-body)}
-.side-me div span{display:block;font-size:12.5px;color:var(--ink-3)}
-.side-search{display:flex;align-items:center;gap:10px;width:100%;padding:10px 12px;margin-bottom:6px;border:0;border-radius:13px;background:rgba(0,0,0,.05);box-shadow:inset 0 1px 2px rgba(0,0,0,.08),0 1px 0 rgba(255,255,255,.5);color:var(--ink-3);font-size:14.5px;text-align:left}
-.side-search span{flex:1}.side-search kbd{font:500 11px var(--f-mono);color:var(--ink-3)}
-.side-search:hover{background:rgba(0,0,0,.075)}
-.side-sec{display:flex;align-items:center;justify-content:space-between;font-size:13px;color:var(--ink-3);padding:16px 8px 6px;margin-top:8px;border-top:1px solid rgba(0,0,0,.08)}
-.side-add{width:22px;height:22px;border-radius:50%;border:1px dashed rgba(0,0,0,.3);background:none;color:var(--ink-2);font-size:14px;line-height:1;padding:0}
-.side-it{display:flex;align-items:center;gap:12px;width:100%;padding:9px 10px;border:0;border-radius:12px;background:none;color:var(--ink);font-size:15px;text-align:left}
-.side-it span:not(.side-ct){flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.side-it svg{width:19px;height:19px;color:var(--ink-2)}
-.side-it:hover{background:rgba(255,255,255,.28)}
-.side-it.on{background:linear-gradient(180deg,rgba(255,255,255,.62),rgba(255,255,255,.34));box-shadow:inset 0 1px 0 #fff,0 10px 20px -14px rgba(0,0,0,.45)}
-.side-ct{min-width:22px;height:22px;padding:0 6px;border-radius:11px;display:grid;place-items:center;font:500 11px var(--f-mono);color:var(--ink-3);background:rgba(255,255,255,.4)}
-.side-tree{margin-top:4px;padding:6px;border-radius:16px;box-shadow:inset 0 0 0 1px rgba(255,255,255,.45);background:rgba(255,255,255,.08)}
-.side-empty{margin:6px 8px;font-size:13px;color:var(--ink-3)}
 @media (max-width:860px){
   .dock{background:linear-gradient(180deg,#2a2a2c,#19191b);border-top:0;color:#d4d4d1}
   .dock-pill{display:contents}
@@ -1146,7 +1126,6 @@ const PATHS = {
   gear: 'M12 9a3 3 0 100 6 3 3 0 000-6zM19.4 15a1.7 1.7 0 00.3 1.8l.1.1a2 2 0 11-2.8 2.8l-.1-.1a1.7 1.7 0 00-1.8-.3 1.7 1.7 0 00-1 1.5V21a2 2 0 11-4 0v-.1a1.7 1.7 0 00-1.1-1.5 1.7 1.7 0 00-1.8.3l-.1.1a2 2 0 11-2.8-2.8l.1-.1a1.7 1.7 0 00.3-1.8 1.7 1.7 0 00-1.5-1H3a2 2 0 110-4h.1a1.7 1.7 0 001.5-1.1 1.7 1.7 0 00-.3-1.8l-.1-.1a2 2 0 112.8-2.8l.1.1a1.7 1.7 0 001.8.3H9a1.7 1.7 0 001-1.5V3a2 2 0 114 0v.1a1.7 1.7 0 001 1.5 1.7 1.7 0 001.8-.3l.1-.1a2 2 0 112.8 2.8l-.1.1a1.7 1.7 0 00-.3 1.8V9a1.7 1.7 0 001.5 1H21a2 2 0 110 4h-.1a1.7 1.7 0 00-1.5 1z',
   search: 'M11 4a7 7 0 100 14 7 7 0 000-14zM20 20l-4-4',
   check: 'M5 12l5 5 9-10', lock: 'M6 11h12v9H6zM8 11V8a4 4 0 118 0v3', plus: 'M12 5v14M5 12h14', undo: 'M9 14L4 9l5-5M4 9h11a5 5 0 010 10h-3',
-  alert: 'M12 4l9 16H3zM12 10v4M12 17.5v.01', wait: 'M12 3a9 9 0 100 18 9 9 0 000-18zM12 7v5l3 2', fork: 'M6 3v6a6 6 0 006 6h0a6 6 0 006-6V3M12 15v6',
   spark: 'M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z', x: 'M6 6l12 12M18 6L6 18', play: 'M7 5l12 7-12 7z', left: 'M15 6l-6 6 6 6', right: 'M9 6l6 6-6 6', repeat: 'M17 2l4 4-4 4M3 11V9a3 3 0 013-3h15M7 22l-4-4 4-4M21 13v2a3 3 0 01-3 3H3', board: 'M4 4h5v16H4zM10.5 4h4.5v10h-4.5zM17 4h3v7h-3z', list: 'M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01',
 };
 const Icon = ({ n, cls }) => html`<svg class=${cls} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d=${PATHS[n]} /></svg>`;
@@ -1171,8 +1150,6 @@ function App() {
   const [dfloat, setDfloat] = useState({ open: false, n: 0 });
   useEffect(() => { window.dianaFloat = () => setDfloat((d) => ({ open: true, n: d.n + 1 })); return () => { window.dianaFloat = null; }; }, []);
   useEffect(() => { if (view === 'assistant') setDfloat((d) => (d.open ? { ...d, open: false } : d)); }, [view]);
-  /* The sidebar can open a project directly; ProjectsView picks this up. */
-  const [projFocus, setProjFocus] = useState(null);
   const hist = useRef([]);
   const [saveOk, setSaveOk] = useState(true);
 
@@ -1323,14 +1300,9 @@ function App() {
 
   if (!state.onboarded) return html`<${Onboarding} onDone=${(s) => setState(s)} now=${now} />`;
 
-  const ctx = { state, plan, computed, now, A, commit, setDrawer, setView, alerts, runCommand, log, draft, setDraft, pendingMoves, applyPlan, setSearch, setToast, projFocus };
+  const ctx = { state, plan, computed, now, A, commit, setDrawer, setView, alerts, runCommand, log, draft, setDraft, pendingMoves, applyPlan, setSearch, setToast };
   const openTasks = state.tasks.filter((t) => t.status !== 'done').length;
   const NAV = [['today', 'Today', 'today'], ['calendar', 'Calendar', 'cal'], ['tasks', 'Tasks', 'tasks', openTasks], ['projects', 'Projects', 'proj', state.projects.filter((p) => p.status !== 'done').length], ['notes', 'Notes', 'notes', state.notes.length], ['assistant', 'Diana', 'diana']];
-  const openT = state.tasks.filter((t) => t.status !== 'done');
-  const activeProjects = state.projects.filter((p) => p.status !== 'done');
-  const STATUS = [['Needs attention', 'alert', (alerts || []).length, () => setView('today')], ['In progress', 'tasks', openT.filter((t) => t.status === 'doing').length, () => setView('tasks')],
-    ['Waiting on others', 'wait', openT.filter((t) => t.kind === 'waiting').length, () => setView('tasks')], ['Decisions', 'fork', openT.filter((t) => t.kind === 'decision').length, () => setView('tasks')]];
-  const openProject = (id) => { setView('projects'); setProjFocus({ id, n: Date.now() }); };
   return html`<div class="app">
     <nav class="rail dock" aria-label="Main">
       <div class="dock-pill">
@@ -1342,17 +1314,6 @@ function App() {
       <div class="spacer"></div>
       <button class=${'nav dock-gear' + (view === 'settings' ? ' on' : '')} onClick=${() => setView('settings')} title="Settings"><${Icon} n="gear" /><span class="lbl">Settings</span><span class="mlbl">Settings</span></button>
     </nav>
-    <aside class="side" aria-label="Overview">
-      <div class="side-me"><span class="side-av">${(state.settings.name || 'JP').trim().slice(0, 2).toUpperCase()}</span><div><b>${state.settings.name || 'JP'}</b><span>${new Date(now).toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })}</span></div></div>
-      <button class="side-search" onClick=${() => setSearch(true)}><${Icon} n="search" /><span>Search</span><kbd>⌘K</kbd></button>
-      <div class="side-sec">Status</div>
-      ${STATUS.map(([l, ic, n, go]) => html`<button key=${l} class="side-it" onClick=${go}><${Icon} n=${ic} /><span>${l}</span>${n ? html`<span class="side-ct">${n}</span>` : null}</button>`)}
-      <div class="side-sec">Projects<button class="side-add" onClick=${() => setView('projects')} title="All projects" aria-label="All projects">+</button></div>
-      <div class="side-tree">
-        ${activeProjects.length ? activeProjects.slice(0, 12).map((p) => { const n = openT.filter((t) => t.projectId === p.id).length; return html`<button key=${p.id} class=${'side-it' + (view === 'projects' && projFocus && projFocus.id === p.id ? ' on' : '')} onClick=${() => openProject(p.id)}><${Icon} n="proj" /><span>${p.name}</span>${n ? html`<span class="side-ct">${n}</span>` : null}</button>`; })
-          : html`<p class="side-empty">No active projects yet.</p>`}
-      </div>
-    </aside>
     <main class=${'main' + (view === 'assistant' ? ' is-diana' : '')}><${FocusBar} ...${ctx} /><div class="wrap">
       ${!saveOk ? html`<div class="banner warn"><b>Not saving.</b><span class="grow">This browser is blocking storage, so changes will be lost when you close the tab. Use Settings → Backup to copy your data out.</span></div>` : null}
       ${pendingMoves ? html`<div class="banner"><b>Proposed update</b><span class="grow">${pendingMoves} work block${pendingMoves > 1 ? 's' : ''} would move to keep the plan realistic.</span><button class="btn sm" onClick=${() => setView('calendar')}>Review</button><button class="btn sm pri" onClick=${applyPlan}>Apply plan</button></div>` : null}
@@ -2144,8 +2105,7 @@ function BoardBy({ by, set, opts }) {
 
 function ProjectsView(ctx) {
   const { state, plan, now, A, draft, setDraft, runCommand, log } = ctx;
-  const [open, setOpen] = useState(() => (ctx.projFocus ? ctx.projFocus.id : null));
-  useEffect(() => { if (ctx.projFocus) setOpen(ctx.projFocus.id); }, [ctx.projFocus && ctx.projFocus.n]);
+  const [open, setOpen] = useState(null);
   const [goal, setGoal] = useState('');
   const [planning, setPlanning] = useState(false);
   const [newOpen, setNewOpen] = useState(false);
