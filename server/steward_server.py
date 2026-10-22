@@ -1467,6 +1467,109 @@ async def api_event(event_id: str):
     hit = next((e for e in _events_all() if e["id"] == event_id), None)
     return {"event": hit} if hit else _api_error(404, "not_found", "No event with that id.")
 
+
+# ---------- GitHub relay: a read-only copy for outside agents, without opening this computer ----------
+# Every STEWARD_GITHUB_EVERY minutes (default 15) the server writes me.json, tasks.json and schedule.json (the same shapes
+# as the read-only API) into a private repo (STEWARD_GITHUB_REPO, "owner/name") using STEWARD_GITHUB_TOKEN, a fine-grained
+# token with Contents read/write on that one repo. A file is committed only when it changed. The outside agent reads them
+# with its own read-only token. Only outgoing HTTPS; nothing listens for the internet.
+GH_TOKEN = os.environ.get("STEWARD_GITHUB_TOKEN", "").strip()
+GH_REPO = os.environ.get("STEWARD_GITHUB_REPO", "").strip().strip("/")
+GH_DIR = os.environ.get("STEWARD_GITHUB_DIR", "steward").strip().strip("/")
+GH_EVERY = max(5, int(os.environ.get("STEWARD_GITHUB_EVERY", "15") or 15))
+RELAY = {"last_push": None, "last_check": None, "error": None, "shas": {}, "hashes": {}}
+
+
+def _relay_files():
+    now = int(time.time() * 1000)
+    tasks = [t for t in _tasks_all() if t["status"] == "open" or (t["completed_at"] and _parse_iso(t["completed_at"], "c") > now - 30 * 86400000)]
+    tasks.sort(key=lambda t: (t["status"] != "open", t["due_at"] is None, t["due_at"] or "", t["title"].lower()))
+    lo, hi = now - 7 * 86400000, now + 60 * 86400000
+    evs = sorted((e for e in _events_all() if _parse_iso(e["starts_at"], "s") < hi and _parse_iso(e["ends_at"], "e") > lo), key=lambda e: e["starts_at"])
+    p = _planner()
+    name = os.environ.get("STEWARD_DISPLAY_NAME", "").strip() or ((p.get("settings") or {}).get("name")) or "Steward user"
+    me = {"user": {"id": "usr_" + _hash_key("steward:" + str(HOME))[:10], "display_name": name, "timezone": API_TZ_NAME}}
+    return {"me.json": me,
+            "tasks.json": {"window": "open tasks, and tasks completed in the last 30 days", "tasks": tasks, "next_cursor": None},
+            "schedule.json": {"from": _iso(lo), "to": _iso(hi), "events": evs, "next_cursor": None}}
+
+
+async def _relay_push():
+    """Commits changed files. Each file carries as_of: when its content last changed."""
+    if not (GH_TOKEN and GH_REPO):
+        return
+    RELAY["last_check"] = int(time.time())
+    headers = {"Authorization": f"Bearer {GH_TOKEN}", "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "Steward"}
+    try:
+        files = _relay_files()
+        async with httpx.AsyncClient(timeout=30, follow_redirects=False) as client:
+            for name, body in files.items():
+                digest = _hash_key(json.dumps(body, sort_keys=True))
+                if RELAY["hashes"].get(name) == digest:
+                    continue
+                url = f"https://api.github.com/repos/{GH_REPO}/contents/{GH_DIR}/{name}"
+                if name not in RELAY["shas"]:
+                    r = await client.get(url, headers=headers)
+                    if r.status_code == 200:
+                        RELAY["shas"][name] = r.json().get("sha")
+                        try:  # unchanged since last run: don't commit again
+                            old = json.loads(base64.b64decode(r.json().get("content", "")))
+                            old.pop("as_of", None)
+                            if _hash_key(json.dumps(old, sort_keys=True)) == digest:
+                                RELAY["hashes"][name] = digest
+                                continue
+                        except Exception:
+                            pass
+                    elif r.status_code != 404:
+                        raise ValueError(f"GitHub answered {r.status_code} for {name}: {r.text[:160]}")
+                out = {"as_of": datetime.now(API_TZ).isoformat(timespec="seconds"), **body}
+                payload = {"message": f"Steward: update {name}", "content": base64.b64encode(json.dumps(out, indent=1).encode()).decode()}
+                if RELAY["shas"].get(name):
+                    payload["sha"] = RELAY["shas"][name]
+                r = await client.put(url, headers=headers, json=payload)
+                if r.status_code not in (200, 201):
+                    RELAY["shas"].pop(name, None)  # someone else changed it: look it up again next time
+                    raise ValueError(f"GitHub answered {r.status_code} for {name}: {r.text[:160]}")
+                RELAY["shas"][name] = r.json()["content"]["sha"]
+                RELAY["hashes"][name] = digest
+                RELAY["last_push"] = int(time.time())
+        RELAY["error"] = None
+    except Exception as e:
+        RELAY["error"] = str(e)[:300]
+        print("GitHub relay:", RELAY["error"])
+
+
+async def _relay_loop():
+    await asyncio.sleep(5)
+    while True:
+        await _relay_push()
+        await asyncio.sleep(GH_EVERY * 60)
+
+
+@app.on_event("startup")
+async def _relay_start():
+    if GH_TOKEN and GH_REPO:
+        asyncio.create_task(_relay_loop())
+        print(f"GitHub relay: writing to {GH_REPO}/{GH_DIR} every {GH_EVERY} minutes" + (", work calendar included" if API_WORK_CAL else ""))
+
+
+@app.get("/v1/relay")
+async def relay_status(request: Request):
+    if not _authorized(request):
+        return JSONResponse({"error": "Wrong Steward key."}, status_code=401)
+    return {"configured": bool(GH_TOKEN and GH_REPO), "repo": GH_REPO or None, "folder": GH_DIR, "every_minutes": GH_EVERY,
+            "work_calendar": API_WORK_CAL, "last_push": RELAY["last_push"], "last_check": RELAY["last_check"], "error": RELAY["error"]}
+
+
+@app.post("/v1/relay/push")
+async def relay_push_now(request: Request):
+    if not _authorized(request):
+        return JSONResponse({"error": "Wrong Steward key."}, status_code=401)
+    if not (GH_TOKEN and GH_REPO):
+        return JSONResponse({"error": "Set STEWARD_GITHUB_REPO and STEWARD_GITHUB_TOKEN in steward.env and restart."}, status_code=400)
+    await _relay_push()
+    return await relay_status(request)
+
 if __name__ == "__main__":
     host, port = os.environ.get("HOST", "127.0.0.1"), int(os.environ.get("PORT", "8787"))
     if not STEWARD_KEY:

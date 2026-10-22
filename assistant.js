@@ -773,8 +773,10 @@ function ConnectionsPanel({ setToast }) {
     if (!r.ok) throw new Error(r.status === 404 ? 'Your Steward server needs updating for this.' : j.error || 'server error ' + r.status);
     return j;
   };
-  const load = () => call('GET', '/v1/apikeys').then(setInfo).catch((e) => setInfo({ error: e.message }));
+  const [relay, setRelay] = useState(null);
+  const load = () => { call('GET', '/v1/apikeys').then(setInfo).catch((e) => setInfo({ error: e.message })); call('GET', '/v1/relay').then(setRelay).catch(() => setRelay(null)); };
   useEffect(() => { if (sp && sp.url && sp.key && !sp.id) load(); }, []);
+  const pushNow = () => call('POST', '/v1/relay/push').then((r) => { setRelay(r); setToast({ text: r.error ? 'GitHub: ' + r.error : 'Sent to GitHub', id: uid() }); }).catch((e) => setToast({ text: e.message, id: uid() }));
   if (!sp || !sp.url || !sp.key || sp.id) return null;
   const keys = ((info && info.keys) || []).slice().reverse();
   const make = () => call('POST', '/v1/apikeys', { label: 'Muse (read-only)' }).then((j) => { setFresh(j.key); load(); }).catch((e) => setToast({ text: e.message, id: uid() }));
@@ -785,6 +787,11 @@ function ConnectionsPanel({ setToast }) {
       <p style=${{ margin: '0 0 10px', color: 'var(--ink-2)' }}>Lets an outside agent such as Muse read your tasks and schedule. Keys are read-only: they can't change anything, and they don't reach Diana, email or documents.
         ${info && !info.error ? (info.api_port ? ' The read-only API is on port ' + info.api_port + (info.work_calendar ? ', work calendar included.' : ', work calendar not included.') : ' Turn the API on with STEWARD_API_PORT in steward.env.') : ''}</p>
       ${info && info.error ? html`<p style=${{ color: 'var(--bad)', margin: 0 }}>${info.error}</p>` : null}
+      ${relay && relay.configured ? html`<div style=${{ display: 'flex', gap: '10px', alignItems: 'center', padding: '8px 0', borderTop: '1px solid var(--line)' }}>
+        <span style=${{ flex: 1 }}>GitHub relay → ${relay.repo}/${relay.folder}, every ${relay.every_minutes} min${relay.work_calendar ? ', work calendar included' : ''}
+          <span class="muted"> · ${relay.last_push ? 'last change sent ' + fmtD(relay.last_push * 1000) + ' ' + fmtT(relay.last_push * 1000) : 'nothing sent yet'}</span>
+          ${relay.error ? html`<br /><span style=${{ color: 'var(--bad)' }}>${relay.error}</span>` : null}</span>
+        <button class="btn sm" onClick=${pushNow}>Send now</button></div>` : null}
       ${fresh ? html`<div style=${{ padding: '10px 12px', borderRadius: '12px', background: 'rgba(255,255,255,.45)', margin: '0 0 10px' }}>
         <b>Copy this key now. It won't be shown again.</b> Paste it only into the secure link Muse gives you, never into a chat.
         <div style=${{ display: 'flex', gap: '8px', marginTop: '8px' }}><input class="in" readonly value=${fresh} onFocus=${(e) => e.target.select()} aria-label="New API key" style=${{ fontFamily: 'var(--f-mono)', fontSize: '12px' }} />
