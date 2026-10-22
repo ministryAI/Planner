@@ -2680,6 +2680,7 @@ function SettingsView({ state, plan, A, setState, commit, setToast, doSync, calS
       <div><button class="btn sm" disabled=${!imp.trim()} onClick=${() => { try { const d = JSON.parse(imp); if (!d.tasks || !d.settings) throw 0; commit(d, 'Backup restored'); setImp(''); } catch (e) { setToast({ text: 'That isn’t a Steward backup — paste the whole copied text', id: uid() }); } }}>Restore backup</button></div>
     </div></div>
     ${typeof DianaSettings === 'function' ? html`<${DianaSettings} state=${state} plan=${plan} commit=${commit} setToast=${setToast} />` : null}
+    ${typeof ConnectionsPanel === 'function' ? html`<${ConnectionsPanel} setToast=${setToast} />` : null}
   </div>`;
 }
 

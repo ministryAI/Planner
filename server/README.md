@@ -65,6 +65,23 @@ Add `STEWARD_VAULT=` followed by the full path of your Obsidian vault to `stewar
 
 She only writes inside her folder. Add `DIANA_VAULT_READ=1` to let her also look things up in the rest of your vault. If the vault syncs (iCloud, Google Drive), everything in it leaves this computer, so keep work-sensitive notes out of it.
 
+## Read-only API for outside agents (Muse, optional)
+An outside agent can read your tasks and schedule through a separate read-only API. It never reaches Diana, email, documents or sync.
+1. Add `STEWARD_API_PORT=8790` to `steward.env`. Optional settings:
+   - `STEWARD_DISPLAY_NAME=Justin`: the name shown to the agent.
+   - `STEWARD_API_WORK_CALENDAR=1`: also share your work calendar. It's off by default.
+2. Restart. In Steward, go to **Settings → Connections → New read-only key**. The key is shown once; only its hash is stored, in `data/api-keys.json`. Revoke it there at any time.
+3. Publish only that port over HTTPS, for example with Tailscale Funnel: `tailscale funnel --bg 8790`. Your address is `https://<this-mac>.<tailnet>.ts.net`, and it stays the same.
+
+Endpoints, all GET with `Authorization: Bearer <key>`:
+- `/v1/me`
+- `/v1/tasks?status=open|completed&due_from=&due_to=&limit=&cursor=` and `/v1/tasks/{id}`
+- `/v1/schedule?from=&to=&limit=&cursor=` and `/v1/schedule/{id}`
+
+Errors are JSON: `{"error":{"code","message"}}`. Requests are limited to 120 a minute per key.
+
+This puts a door to your planner on the internet. Use it only if your employer allows that from this computer.
+
 ## Updating the server
 When Steward gets a new server feature, run this once in Terminal. It downloads the new server file and stops the old server:
 ```
