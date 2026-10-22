@@ -762,6 +762,39 @@ function AssistantView(ctx) {
   </div>`;
 }
 
+/* Settings → Connections: read-only API keys for outside agents (e.g. Muse). A key is shown once; only its hash is kept. */
+function ConnectionsPanel({ setToast }) {
+  const [info, setInfo] = useState(null);
+  const [fresh, setFresh] = useState(null);
+  const sp = typeof kinSpace === 'function' ? kinSpace() : null;
+  const call = async (method, path, body) => {
+    const r = await fetch(sp.url + path, { method, headers: { Authorization: 'Bearer ' + sp.key, 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(r.status === 404 ? 'Your Steward server needs updating for this.' : j.error || 'server error ' + r.status);
+    return j;
+  };
+  const load = () => call('GET', '/v1/apikeys').then(setInfo).catch((e) => setInfo({ error: e.message }));
+  useEffect(() => { if (sp && sp.url && sp.key && !sp.id) load(); }, []);
+  if (!sp || !sp.url || !sp.key || sp.id) return null;
+  const keys = ((info && info.keys) || []).slice().reverse();
+  const make = () => call('POST', '/v1/apikeys', { label: 'Muse (read-only)' }).then((j) => { setFresh(j.key); load(); }).catch((e) => setToast({ text: e.message, id: uid() }));
+  const revoke = (k) => { if (confirm('Revoke “' + k.label + '”? Anything using it loses access right away.')) call('DELETE', '/v1/apikeys/' + k.id).then(load).catch((e) => setToast({ text: e.message, id: uid() })); };
+  return html`<section class="panel" style=${{ marginBottom: '16px' }}>
+    <div class="ph"><h2>Connections</h2><span class="grow"></span><button class="btn sm" onClick=${make} disabled=${!info || !!info.error}>New read-only key</button></div>
+    <div style=${{ padding: '12px 16px' }} class="small">
+      <p style=${{ margin: '0 0 10px', color: 'var(--ink-2)' }}>Lets an outside agent such as Muse read your tasks and schedule. Keys are read-only: they can't change anything, and they don't reach Diana, email or documents.
+        ${info && !info.error ? (info.api_port ? ' The read-only API is on port ' + info.api_port + (info.work_calendar ? ', work calendar included.' : ', work calendar not included.') : ' Turn the API on with STEWARD_API_PORT in steward.env.') : ''}</p>
+      ${info && info.error ? html`<p style=${{ color: 'var(--bad)', margin: 0 }}>${info.error}</p>` : null}
+      ${fresh ? html`<div style=${{ padding: '10px 12px', borderRadius: '12px', background: 'rgba(255,255,255,.45)', margin: '0 0 10px' }}>
+        <b>Copy this key now. It won't be shown again.</b> Paste it only into the secure link Muse gives you, never into a chat.
+        <div style=${{ display: 'flex', gap: '8px', marginTop: '8px' }}><input class="in" readonly value=${fresh} onFocus=${(e) => e.target.select()} aria-label="New API key" style=${{ fontFamily: 'var(--f-mono)', fontSize: '12px' }} />
+        <button class="btn sm" onClick=${() => navigator.clipboard.writeText(fresh).then(() => setToast({ text: 'Key copied', id: uid() }))}>Copy</button><button class="btn sm ghost" onClick=${() => setFresh(null)}>Done</button></div></div>` : null}
+      ${keys.length ? keys.map((k) => html`<div key=${k.id} style=${{ display: 'flex', gap: '10px', alignItems: 'center', padding: '8px 0', borderTop: '1px solid var(--line)' }}>
+        <span style=${{ flex: 1 }}>${k.label} <span class="muted">· …${k.hint} · made ${fmtD(k.created * 1000)}${k.last_used ? ' · last used ' + fmtD(k.last_used * 1000) : ' · never used'}</span></span>
+        ${k.revoked ? html`<span class="muted">Revoked</span>` : html`<button class="btn sm ghost danger" onClick=${() => revoke(k)}>Revoke</button>`}</div>`) : info && !info.error ? html`<p class="muted" style=${{ margin: 0 }}>No keys yet.</p>` : null}
+    </div></section>`;
+}
+
 /* Work email: read-only status of the Power Automate feed on the Steward server. */
 function WorkEmailStatus() {
   const [st, setSt] = useState(null);

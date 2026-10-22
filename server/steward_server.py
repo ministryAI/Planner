@@ -40,7 +40,7 @@ if _env.exists():
 
 import httpx
 import uvicorn
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
@@ -1189,9 +1189,296 @@ def status_page():
 </body></html>"""
 
 
+# ---------- read-only public API for outside agents (e.g. Muse) ----------
+# A separate app on its own port (STEWARD_API_PORT), so a tunnel can expose only these routes: /v1/me, /v1/tasks,
+# /v1/schedule. Diana, email, documents and sync stay on the main, local-only server. Keys are made and revoked from
+# Steward (Settings → Connections), shown once, and stored only as SHA-256 hashes in data/api-keys.json.
+# They are read-only and work only here, never on the main server; the Steward key doesn't work here.
+import hashlib
+from zoneinfo import ZoneInfo
+
+API_PORT = int(os.environ.get("STEWARD_API_PORT", "0") or 0)
+API_KEYS_FILE = DATA_FILE.parent / "api-keys.json"
+API_WORK_CAL = os.environ.get("STEWARD_API_WORK_CALENDAR", "").strip().lower() in ("1", "true", "yes", "on")
+API_RATE = int(os.environ.get("STEWARD_API_RATE", "120"))  # requests per key per minute
+
+
+def _local_tz_name():
+    name = os.environ.get("STEWARD_TIMEZONE", "").strip()
+    if not name:
+        real = os.path.realpath("/etc/localtime")
+        name = real.split("zoneinfo/", 1)[1] if "zoneinfo/" in real else "UTC"
+    try:
+        ZoneInfo(name)
+        return name
+    except Exception:
+        return "UTC"
+
+
+API_TZ_NAME = _local_tz_name()
+API_TZ = ZoneInfo(API_TZ_NAME)
+
+
+def _keys_read():
+    try:
+        return json.loads(API_KEYS_FILE.read_text())
+    except Exception:
+        return []
+
+
+def _keys_write(keys):
+    tmp = API_KEYS_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(keys, indent=1))
+    try:
+        os.chmod(tmp, 0o600)
+    except Exception:
+        pass
+    tmp.replace(API_KEYS_FILE)
+
+
+def _hash_key(key):
+    return hashlib.sha256(key.encode()).hexdigest()
+
+
+@app.get("/v1/apikeys")
+async def apikeys_list(request: Request):
+    if not _authorized(request):
+        return JSONResponse({"error": "Wrong Steward key."}, status_code=401)
+    return {"api_port": API_PORT or None, "work_calendar": API_WORK_CAL,
+            "keys": [{k: v for k, v in x.items() if k != "hash"} for x in _keys_read()]}
+
+
+@app.post("/v1/apikeys")
+async def apikeys_create(request: Request):
+    """Makes a read-only key. The key itself is returned once and never stored."""
+    if not _authorized(request):
+        return JSONResponse({"error": "Wrong Steward key."}, status_code=401)
+    body = await request.json() if request.headers.get("content-length") not in (None, "0") else {}
+    label = re.sub(r"\s+", " ", str(body.get("label") or "Read-only key")).strip()[:60]
+    key = "stw_" + secrets.token_urlsafe(32)
+    entry = {"id": "key_" + secrets.token_hex(6), "label": label, "scope": ["read"], "created": int(time.time()), "revoked": None, "last_used": None,
+             "hint": key[-4:], "hash": _hash_key(key)}
+    _keys_write(_keys_read() + [entry])
+    return {"id": entry["id"], "label": label, "key": key, "scope": entry["scope"]}
+
+
+@app.delete("/v1/apikeys/{key_id}")
+async def apikeys_revoke(key_id: str, request: Request):
+    if not _authorized(request):
+        return JSONResponse({"error": "Wrong Steward key."}, status_code=401)
+    keys = _keys_read()
+    hit = next((k for k in keys if k["id"] == key_id), None)
+    if not hit:
+        return JSONResponse({"error": "No key with that id."}, status_code=404)
+    hit["revoked"] = hit["revoked"] or int(time.time())
+    _keys_write(keys)
+    return {"ok": True}
+
+
+api = FastAPI(title="Steward read-only API", docs_url=None, redoc_url=None, openapi_url=None)
+api.router.redirect_slashes = False  # authenticated calls must never redirect
+_API_HITS = {}
+
+
+def _api_error(status, code, message):
+    return JSONResponse({"error": {"code": code, "message": message}}, status_code=status)
+
+
+@api.exception_handler(404)
+async def _api_404(request, exc):
+    return _api_error(404, "not_found", "No such endpoint or item.")
+
+
+@api.exception_handler(405)
+async def _api_405(request, exc):
+    return _api_error(405, "method_not_allowed", "This API is read-only: only GET is allowed.")
+
+
+@api.exception_handler(500)
+async def _api_500(request, exc):
+    return _api_error(500, "server_error", "Something went wrong on the Steward server.")
+
+
+@api.middleware("http")
+async def _api_auth(request: Request, call_next):
+    if not request.url.path.startswith("/v1/"):
+        return _api_error(404, "not_found", "No such endpoint.")
+    if request.method != "GET":
+        return _api_error(405, "method_not_allowed", "This API is read-only: only GET is allowed.")
+    given = request.headers.get("authorization", "")
+    if not given.lower().startswith("bearer ") or not given[7:].strip():
+        return _api_error(401, "unauthorized", "Missing or invalid API key")
+    digest = _hash_key(given[7:].strip())
+    keys = _keys_read()
+    hit = next((k for k in keys if secrets.compare_digest(k.get("hash", ""), digest)), None)
+    if not hit or hit.get("revoked"):
+        return _api_error(401, "unauthorized", "Missing or invalid API key")
+    if "read" not in (hit.get("scope") or []):
+        return _api_error(403, "forbidden", "This key can't read Steward data.")
+    minute = int(time.time() // 60)
+    n = _API_HITS.get((hit["id"], minute), 0) + 1
+    _API_HITS.clear() if len(_API_HITS) > 1000 else None
+    _API_HITS[(hit["id"], minute)] = n
+    if n > API_RATE:
+        return _api_error(429, "rate_limited", f"More than {API_RATE} requests a minute. Try again shortly.")
+    if not hit.get("last_used") or hit["last_used"] < time.time() - 300:
+        hit["last_used"] = int(time.time())
+        try:
+            _keys_write(keys)
+        except Exception:
+            pass
+    try:
+        return await call_next(request)
+    except Exception as e:
+        print("API error:", e)
+        return _api_error(500, "server_error", "Something went wrong on the Steward server.")
+
+
+def _iso(ms):
+    if ms in (None, "", 0):
+        return None
+    try:
+        return datetime.fromtimestamp(int(ms) / 1000, tz=API_TZ).isoformat(timespec="seconds")
+    except Exception:
+        return None
+
+
+def _parse_iso(v, name):
+    try:
+        d = datetime.fromisoformat(str(v).strip().replace("Z", "+00:00"))
+        return int((d if d.tzinfo else d.replace(tzinfo=API_TZ)).timestamp() * 1000)
+    except Exception:
+        raise ValueError(f"{name} must be an ISO 8601 date-time, e.g. 2026-10-22T09:00:00-05:00")
+
+
+def _page(items, limit, cursor, default, cap):
+    try:
+        limit = max(1, min(int(limit or default), cap))
+    except Exception:
+        limit = default
+    try:
+        start = int(base64.urlsafe_b64decode((cursor or "").encode() + b"==").decode() or 0) if cursor else 0
+    except Exception:
+        raise ValueError("cursor is not valid; use next_cursor from the previous page")
+    chunk = items[start:start + limit]
+    nxt = base64.urlsafe_b64encode(str(start + limit).encode()).decode().rstrip("=") if start + limit < len(items) else None
+    return chunk, nxt
+
+
+def _planner():
+    _load_store()
+    d = STORE["data"] or {}
+    return d.get("planner", d) if isinstance(d, dict) else {}
+
+
+_PRIORITY = {"asap": "urgent", "high": "high", "med": "normal", "low": "low"}
+
+
+def _task_out(t, projects, blocks):
+    mine = sorted((b for b in blocks if b.get("taskId") == t.get("id")), key=lambda b: b.get("start", 0))
+    done = t.get("status") == "done"
+    return {"id": "task_" + str(t.get("id")), "title": str(t.get("title") or ""), "notes": t.get("desc") or None,
+            "status": "completed" if done else "open", "progress": None if done else (t.get("status") or "todo"),
+            "due_at": _iso(t.get("deadline")),
+            "scheduled_start_at": _iso(mine[0].get("start")) if mine else None, "scheduled_end_at": _iso(mine[-1].get("end")) if mine else None,
+            "priority": _PRIORITY.get(t.get("priority"), "normal"), "list": projects.get(t.get("projectId")),
+            "tags": list(t.get("labels") or []), "created_at": _iso(t.get("created")),
+            "updated_at": _iso(t.get("upd") or t.get("updated") or t.get("completed") or t.get("created")), "completed_at": _iso(t.get("completed")) if done else None}
+
+
+def _tasks_all():
+    p = _planner()
+    projects = {x.get("id"): x.get("name") for x in p.get("projects") or []}
+    blocks = ((p.get("plan") or {}).get("blocks") or []) if isinstance(p.get("plan"), dict) else []
+    return [_task_out(t, projects, blocks) for t in p.get("tasks") or [] if not t.get("sample")]
+
+
+@api.get("/v1/me")
+async def api_me():
+    p = _planner()
+    name = os.environ.get("STEWARD_DISPLAY_NAME", "").strip() or ((p.get("settings") or {}).get("name")) or "Steward user"
+    return {"user": {"id": "usr_" + _hash_key("steward:" + str(HOME))[:10], "display_name": name, "timezone": API_TZ_NAME}}
+
+
+@api.get("/v1/tasks")
+async def api_tasks(status: str = "open", due_from: str = None, due_to: str = None, limit: int = 50, cursor: str = None):
+    if status not in ("open", "completed", "cancelled"):
+        return _api_error(400, "bad_request", "status must be open, completed or cancelled")
+    try:
+        lo = _parse_iso(due_from, "due_from") if due_from else None
+        hi = _parse_iso(due_to, "due_to") if due_to else None
+        tasks = [t for t in _tasks_all() if t["status"] == status]  # Steward has no cancelled tasks yet: that list is empty
+        if lo is not None or hi is not None:
+            def due_ms(t):
+                return _parse_iso(t["due_at"], "due_at") if t["due_at"] else None
+            tasks = [t for t in tasks if due_ms(t) is not None and (lo is None or due_ms(t) >= lo) and (hi is None or due_ms(t) <= hi)]
+        tasks.sort(key=lambda t: (t["due_at"] is None, t["due_at"] or "", t["title"].lower()))
+        chunk, nxt = _page(tasks, limit, cursor, 50, 200)
+    except ValueError as e:
+        return _api_error(400, "bad_request", str(e))
+    return {"tasks": chunk, "next_cursor": nxt}
+
+
+@api.get("/v1/tasks/{task_id}")
+async def api_task(task_id: str):
+    hit = next((t for t in _tasks_all() if t["id"] == task_id), None)
+    return {"task": hit} if hit else _api_error(404, "not_found", "No task with that id.")
+
+
+def _events_all():
+    p = _planner()
+    out = []
+    for e in p.get("events") or []:
+        if e.get("sample") or e.get("src"):
+            continue
+        all_day = bool(e.get("allDay"))
+        out.append({"id": "evt_" + str(e.get("id")), "title": str(e.get("title") or ""), "notes": e.get("notes") or e.get("desc") or None,
+                    "starts_at": _iso(e.get("start")), "ends_at": _iso(e.get("end")), "all_day": all_day, "timezone": API_TZ_NAME,
+                    "location": e.get("location") or None, "status": "confirmed", "related_task_id": ("task_" + str(e["taskId"])) if e.get("taskId") else None,
+                    "created_at": _iso(e.get("created")), "updated_at": _iso(e.get("upd") or e.get("updated") or e.get("created")), "source": "steward"})
+    if API_WORK_CAL:
+        for e in (_work_cache_read().get("events") or []):
+            def t(v):
+                return _iso(v) if isinstance(v, (int, float)) else datetime.fromisoformat(v).replace(tzinfo=API_TZ).isoformat(timespec="seconds")
+            out.append({"id": "work_" + str(e.get("uid")), "title": e.get("title") or "", "notes": None, "starts_at": t(e["start"]), "ends_at": t(e["end"]),
+                        "all_day": bool(e.get("allDay")), "timezone": API_TZ_NAME, "location": e.get("location") or None,
+                        "status": "tentative" if e.get("tentative") else "confirmed", "related_task_id": None, "created_at": None, "updated_at": None, "source": "work"})
+    return [x for x in out if x["starts_at"] and x["ends_at"]]
+
+
+@api.get("/v1/schedule")
+async def api_schedule(from_: str = Query(None, alias="from"), to: str = None, limit: int = 100, cursor: str = None):
+    if not from_ or not to:
+        return _api_error(400, "bad_request", "from and to are required ISO 8601 date-times")
+    try:
+        lo, hi = _parse_iso(from_, "from"), _parse_iso(to, "to")
+        if hi <= lo:
+            raise ValueError("to must be after from")
+        evs = [e for e in _events_all() if _parse_iso(e["starts_at"], "s") < hi and _parse_iso(e["ends_at"], "e") > lo]
+        evs.sort(key=lambda e: (e["starts_at"], e["title"].lower()))
+        chunk, nxt = _page(evs, limit, cursor, 100, 500)
+    except ValueError as e:
+        return _api_error(400, "bad_request", str(e))
+    return {"events": chunk, "next_cursor": nxt}
+
+
+@api.get("/v1/schedule/{event_id}")
+async def api_event(event_id: str):
+    hit = next((e for e in _events_all() if e["id"] == event_id), None)
+    return {"event": hit} if hit else _api_error(404, "not_found", "No event with that id.")
+
 if __name__ == "__main__":
     host, port = os.environ.get("HOST", "127.0.0.1"), int(os.environ.get("PORT", "8787"))
     if not STEWARD_KEY:
         print("⚠️  No STEWARD_KEY yet. Copy steward.env.example to steward.env and set one.")
     print(f"Steward server on http://{host}:{port}  ·  model {', '.join(MODELS)}  ·  data in {HOME}")
-    uvicorn.run(app, host=host, port=port, log_level="warning")
+    if not API_PORT:
+        uvicorn.run(app, host=host, port=port, log_level="warning")
+    else:
+        # The read-only API listens on this computer only; a tunnel (e.g. Tailscale Funnel) publishes just that port.
+        print(f"Read-only API on http://127.0.0.1:{API_PORT}  ·  work calendar {'included' if API_WORK_CAL else 'not included'}")
+        async def _both():
+            servers = [uvicorn.Server(uvicorn.Config(app, host=host, port=port, log_level="warning")),
+                       uvicorn.Server(uvicorn.Config(api, host="127.0.0.1", port=API_PORT, log_level="warning"))]
+            await asyncio.gather(*(srv.serve() for srv in servers))
+        asyncio.run(_both())
