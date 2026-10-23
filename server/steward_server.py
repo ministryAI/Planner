@@ -16,6 +16,7 @@ Settings come from environment variables or a steward.env file next to this scri
 import asyncio
 import base64
 import binascii
+import hashlib
 import json
 import os
 import re
@@ -89,8 +90,10 @@ GUIDE_MD = """# How Diana's notes work
 This guide ships with Steward and is rewritten each time the server starts, so edits here don't stick.
 
 - DIANA.md holds Diana's standing instructions. Steward sends it with every message.
-- about-me.md and facts.md hold lasting facts about the user. Steward sends them with every message, so keep them short.
-  To make Diana forget something, delete the line.
+- about-me.md is the user's profile. Steward sends it with every message, so keep it short.
+- facts.md is Diana's memory, the same list as Settings → Diana in Steward. One fact per line; the ^code at the end is
+  its id. Add #pinned to a line to send it with every message; the rest are picked by relevance. Delete a line to make
+  Diana forget it; edit a line to correct it.
 - people/<Name>.md holds one page per person. A page is used when that person comes up.
 - memory/YYYY-MM-DD.md is the daily log: one line per exchange, added automatically. Work email details are left out.
 - Notes elsewhere in the vault are only read when DIANA_VAULT_READ=1 is set in steward.env. Diana never writes outside this folder.
@@ -128,6 +131,66 @@ def _vault_text(name, limit):
     return t if len(t) <= limit else "…" + t[-limit:]
 
 
+def _profile_text(limit=3000):
+    """about-me.md from the vault, or from the documents folder when there's no vault."""
+    if VAULT_DIR and not VAULT_ERROR:
+        t = _vault_text("about-me.md", limit)
+        if t:
+            return t
+    try:
+        t = (DOCS_DIR / "about-me.md").read_text(encoding="utf-8", errors="ignore").strip()
+        return t if len(t) <= limit else t[:limit] + "…"
+    except Exception:
+        return ""
+
+
+# facts.md is Diana's memory when a vault is set: one "- fact" line each, ending in an Obsidian block id (^id) so
+# Steward can edit or delete exactly that line. Lines without an id (written by hand) get one from their text.
+# "#pinned" marks a fact that goes with every message. Other lines in the file are left untouched.
+_FACT_LINE = re.compile(r"^\s*[-*]\s+(.+?)\s*$")
+
+
+def _fact_parse(line):
+    m = _FACT_LINE.match(line)
+    if not m:
+        return None
+    body = m.group(1)
+    fid = None
+    hit = re.search(r"\s\^([A-Za-z0-9-]+)$", body)
+    if hit:
+        fid, body = hit.group(1), body[:hit.start()].rstrip()
+    src = None
+    hit = re.search(r"\s\(from (.+?)\)$", body)
+    if hit:
+        src, body = hit.group(1), body[:hit.start()].rstrip()
+    pinned = bool(re.search(r"(^|\s)#pinned\b", body))
+    text = re.sub(r"\s*#pinned\b", "", body).strip()
+    if len(text) < 2:
+        return None
+    return {"id": fid or ("h" + hashlib.sha1(text.lower().encode()).hexdigest()[:8]), "text": text, "pinned": pinned, "source": src}
+
+
+def _fact_line(f):
+    return "- " + f["text"] + (" #pinned" if f.get("pinned") else "") + (f" (from {f['source']})" if f.get("source") else "") + " ^" + f["id"]
+
+
+def _facts_load():
+    path = VAULT_DIR / "facts.md"
+    lines = path.read_text(encoding="utf-8", errors="ignore").splitlines() if path.exists() else []
+    return lines, [(i, f) for i, f in ((i, _fact_parse(l)) for i, l in enumerate(lines)) if f]
+
+
+def _facts_save(lines):
+    path = VAULT_DIR / "facts.md"
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+def _fact_id(raw):
+    return re.sub(r"[^A-Za-z0-9-]", "", str(raw or ""))[:24] or ("m" + secrets.token_hex(4))
+
+
 _vault_setup()
 
 app = FastAPI(title="Steward")
@@ -158,7 +221,7 @@ def _load_chunks():
     if not DOCS_DIR.exists():
         return chunks
     for path in sorted(DOCS_DIR.rglob("*")):
-        if path.suffix.lower() not in {".txt", ".md", ".pdf"} or path.name.lower() == "readme.md":
+        if path.suffix.lower() not in {".txt", ".md", ".pdf"} or path.name.lower() in ("readme.md", "about-me.md"):
             continue
         try:
             text = re.sub(r"\s+", " ", _read(path)).strip()
@@ -284,10 +347,11 @@ async def chat(request: Request):
     if passages:
         docs = "\n\n".join(f"[{p['source']}] {p['text']}" for p in passages)
         note += "\n\nRelevant passages from the user's documents (cite the file name when you use them):\n" + docs
-    if VAULT_DIR and use_docs and not VAULT_ERROR:
-        own = [("Your standing instructions (DIANA.md, written by the user; follow them)", _vault_text("DIANA.md", 2500)),
-               ("About the user (about-me.md)", _vault_text("about-me.md", 3000)),
-               ("Lasting facts you have saved (facts.md)", _vault_text("facts.md", 2500))]
+    # The profile goes with every message; saved facts come from Steward itself (pinned ones plus the most relevant).
+    if use_docs:
+        vault_ok = VAULT_DIR and not VAULT_ERROR
+        own = [("Your standing instructions (DIANA.md, written by the user; follow them)", _vault_text("DIANA.md", 2500) if vault_ok else ""),
+               ("About the user (their profile)", _profile_text())]
         note += "".join(f"\n\n{title}:\n{text}" for title, text in own if text)
     if messages[0]["role"] == "system":
         messages[0] = {"role": "system", "content": str(messages[0]["content"]) + note}
@@ -663,20 +727,106 @@ async def vault_remember(request: Request):
     if bad:
         return bad
     body = await request.json()
-    facts = [_clean_line(x, 300) for x in (body.get("facts") or []) if len(_clean_line(x)) >= 4][:50]
+    facts = [_clean_line(x, 300) for x in (body.get("facts") or []) if len(_clean_line(x)) >= 4][:200]
     person = re.sub(r"[^\w .'-]+", "", str(body.get("person") or "")).strip()[:60]
     src = body.get("source") or f"[[{VAULT_DIR.name}/memory/{_today()}|{_today()}]]"
     if not facts:
         return {"ok": True, "added": 0}
-    target = VAULT_DIR / "people" / f"{person}.md" if person else VAULT_DIR / "facts.md"
-    have = target.read_text(encoding="utf-8", errors="ignore").lower() if target.exists() else ""
-    new = []
-    for f in facts:
-        if f.lower() not in have:
-            new.append(f); have += "\n" + f.lower()
-    _append(target, [f"- {f} (from {src})" for f in new], f"# {person}\n\n" if person else "")
+    if person:
+        target = VAULT_DIR / "people" / f"{person}.md"
+        have = target.read_text(encoding="utf-8", errors="ignore").lower() if target.exists() else ""
+        new = []
+        for f in facts:
+            if f.lower() not in have:
+                new.append(f); have += "\n" + f.lower()
+        _append(target, [f"- {f} (from {src})" for f in new], f"# {person}\n\n")
+    else:
+        lines, have = _facts_load()
+        known = {f["text"].lower() for _, f in have}
+        new = []
+        for f in facts:
+            if f.lower() not in known:
+                known.add(f.lower()); new.append(f)
+                lines.append(_fact_line({"id": _fact_id(None), "text": f, "source": src}))
+        _facts_save(lines)
+        target = VAULT_DIR / "facts.md"
     _reload_docs()
     return {"ok": True, "added": len(new), "file": str(target.relative_to(VAULT))}
+
+
+@app.get("/v1/vault/facts")
+async def vault_facts(request: Request):
+    bad = _vault_ready(request)
+    if bad:
+        return bad
+    _, facts = _facts_load()
+    return {"facts": [f for _, f in facts]}
+
+
+@app.post("/v1/vault/facts")
+async def vault_fact_add(request: Request):
+    """Adds a fact, or replaces one (replaces: id) when it corrects or updates it. The old wording goes to today's log."""
+    bad = _vault_ready(request)
+    if bad:
+        return bad
+    body = await request.json()
+    text = _clean_line(body.get("text"), 300)
+    if len(text) < 4:
+        return JSONResponse({"error": "A fact needs a few words."}, status_code=400)
+    lines, facts = _facts_load()
+    fid = _fact_id(body.get("id"))
+    src = body.get("source") or f"[[{VAULT_DIR.name}/memory/{_today()}|{_today()}]]"
+    same = next(((i, f) for i, f in facts if f["text"].lower() == text.lower()), None)
+    if same:
+        return {"ok": True, "fact": same[1], "added": False}
+    old = next(((i, f) for i, f in facts if f["id"] == str(body.get("replaces") or "")), None)
+    fact = {"id": fid, "text": text, "pinned": bool(body.get("pinned")) or bool(old and old[1]["pinned"]), "source": src}
+    if old:
+        lines[old[0]] = _fact_line(fact)
+        _append(VAULT_DIR / "memory" / f"{_today()}.md", [f"- {time.strftime('%H:%M')} Updated a fact. Was: {old[1]['text']} Now: {text}"], f"# {_today()}\n\n")
+    else:
+        lines.append(_fact_line(fact))
+    _facts_save(lines)
+    return {"ok": True, "fact": fact, "added": True, "replaced": old[1]["id"] if old else None}
+
+
+@app.patch("/v1/vault/facts/{fact_id}")
+async def vault_fact_edit(fact_id: str, request: Request):
+    bad = _vault_ready(request)
+    if bad:
+        return bad
+    body = await request.json()
+    lines, facts = _facts_load()
+    hit = next(((i, f) for i, f in facts if f["id"] == fact_id), None)
+    if not hit:
+        return JSONResponse({"error": "No fact with that id (it may have been edited in Obsidian)."}, status_code=404)
+    f = dict(hit[1])
+    if "text" in body:
+        text = _clean_line(body.get("text"), 300)
+        if len(text) < 2:
+            return JSONResponse({"error": "A fact needs a few words."}, status_code=400)
+        f["text"] = text
+    if "pinned" in body:
+        f["pinned"] = bool(body.get("pinned"))
+    f["id"] = fact_id
+    lines[hit[0]] = _fact_line(f)
+    _facts_save(lines)
+    return {"ok": True, "fact": f}
+
+
+@app.delete("/v1/vault/facts/{fact_id}")
+async def vault_fact_delete(fact_id: str, request: Request):
+    """Forgetting removes the line; nothing about it is written anywhere else."""
+    bad = _vault_ready(request)
+    if bad:
+        return bad
+    lines, facts = _facts_load()
+    hit = next(((i, f) for i, f in facts if f["id"] == fact_id), None)
+    if hit:
+        del lines[hit[0]]
+        _facts_save(lines)
+    return {"ok": True, "deleted": bool(hit)}
+
 
 @app.get("/v1/events")
 async def events_get(request: Request, since: int = 0, limit: int = 2000):
@@ -1194,7 +1344,6 @@ def status_page():
 # /v1/schedule. Diana, email, documents and sync stay on the main, local-only server. Keys are made and revoked from
 # Steward (Settings → Connections), shown once, and stored only as SHA-256 hashes in data/api-keys.json.
 # They are read-only and work only here, never on the main server; the Steward key doesn't work here.
-import hashlib
 from zoneinfo import ZoneInfo
 
 API_PORT = int(os.environ.get("STEWARD_API_PORT", "0") or 0)
