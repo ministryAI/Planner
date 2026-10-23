@@ -16,6 +16,7 @@ Settings come from environment variables or a steward.env file next to this scri
 import asyncio
 import base64
 import binascii
+import hashlib
 import json
 import os
 import re
@@ -89,8 +90,10 @@ GUIDE_MD = """# How Diana's notes work
 This guide ships with Steward and is rewritten each time the server starts, so edits here don't stick.
 
 - DIANA.md holds Diana's standing instructions. Steward sends it with every message.
-- about-me.md and facts.md hold lasting facts about the user. Steward sends them with every message, so keep them short.
-  To make Diana forget something, delete the line.
+- about-me.md is the user's profile. Steward sends it with every message, so keep it short.
+- facts.md is Diana's memory, the same list as Settings → Diana in Steward. One fact per line; the ^code at the end is
+  its id. Add #pinned to a line to send it with every message; the rest are picked by relevance. Delete a line to make
+  Diana forget it; edit a line to correct it.
 - people/<Name>.md holds one page per person. A page is used when that person comes up.
 - memory/YYYY-MM-DD.md is the daily log: one line per exchange, added automatically. Work email details are left out.
 - Notes elsewhere in the vault are only read when DIANA_VAULT_READ=1 is set in steward.env. Diana never writes outside this folder.
@@ -128,6 +131,66 @@ def _vault_text(name, limit):
     return t if len(t) <= limit else "…" + t[-limit:]
 
 
+def _profile_text(limit=3000):
+    """about-me.md from the vault, or from the documents folder when there's no vault."""
+    if VAULT_DIR and not VAULT_ERROR:
+        t = _vault_text("about-me.md", limit)
+        if t:
+            return t
+    try:
+        t = (DOCS_DIR / "about-me.md").read_text(encoding="utf-8", errors="ignore").strip()
+        return t if len(t) <= limit else t[:limit] + "…"
+    except Exception:
+        return ""
+
+
+# facts.md is Diana's memory when a vault is set: one "- fact" line each, ending in an Obsidian block id (^id) so
+# Steward can edit or delete exactly that line. Lines without an id (written by hand) get one from their text.
+# "#pinned" marks a fact that goes with every message. Other lines in the file are left untouched.
+_FACT_LINE = re.compile(r"^\s*[-*]\s+(.+?)\s*$")
+
+
+def _fact_parse(line):
+    m = _FACT_LINE.match(line)
+    if not m:
+        return None
+    body = m.group(1)
+    fid = None
+    hit = re.search(r"\s\^([A-Za-z0-9-]+)$", body)
+    if hit:
+        fid, body = hit.group(1), body[:hit.start()].rstrip()
+    src = None
+    hit = re.search(r"\s\(from (.+?)\)$", body)
+    if hit:
+        src, body = hit.group(1), body[:hit.start()].rstrip()
+    pinned = bool(re.search(r"(^|\s)#pinned\b", body))
+    text = re.sub(r"\s*#pinned\b", "", body).strip()
+    if len(text) < 2:
+        return None
+    return {"id": fid or ("h" + hashlib.sha1(text.lower().encode()).hexdigest()[:8]), "text": text, "pinned": pinned, "source": src}
+
+
+def _fact_line(f):
+    return "- " + f["text"] + (" #pinned" if f.get("pinned") else "") + (f" (from {f['source']})" if f.get("source") else "") + " ^" + f["id"]
+
+
+def _facts_load():
+    path = VAULT_DIR / "facts.md"
+    lines = path.read_text(encoding="utf-8", errors="ignore").splitlines() if path.exists() else []
+    return lines, [(i, f) for i, f in ((i, _fact_parse(l)) for i, l in enumerate(lines)) if f]
+
+
+def _facts_save(lines):
+    path = VAULT_DIR / "facts.md"
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+def _fact_id(raw):
+    return re.sub(r"[^A-Za-z0-9-]", "", str(raw or ""))[:24] or ("m" + secrets.token_hex(4))
+
+
 _vault_setup()
 
 app = FastAPI(title="Steward")
@@ -158,7 +221,7 @@ def _load_chunks():
     if not DOCS_DIR.exists():
         return chunks
     for path in sorted(DOCS_DIR.rglob("*")):
-        if path.suffix.lower() not in {".txt", ".md", ".pdf"} or path.name.lower() == "readme.md":
+        if path.suffix.lower() not in {".txt", ".md", ".pdf"} or path.name.lower() in ("readme.md", "about-me.md"):
             continue
         try:
             text = re.sub(r"\s+", " ", _read(path)).strip()
@@ -284,10 +347,11 @@ async def chat(request: Request):
     if passages:
         docs = "\n\n".join(f"[{p['source']}] {p['text']}" for p in passages)
         note += "\n\nRelevant passages from the user's documents (cite the file name when you use them):\n" + docs
-    if VAULT_DIR and use_docs and not VAULT_ERROR:
-        own = [("Your standing instructions (DIANA.md, written by the user; follow them)", _vault_text("DIANA.md", 2500)),
-               ("About the user (about-me.md)", _vault_text("about-me.md", 3000)),
-               ("Lasting facts you have saved (facts.md)", _vault_text("facts.md", 2500))]
+    # The profile goes with every message; saved facts come from Steward itself (pinned ones plus the most relevant).
+    if use_docs:
+        vault_ok = VAULT_DIR and not VAULT_ERROR
+        own = [("Your standing instructions (DIANA.md, written by the user; follow them)", _vault_text("DIANA.md", 2500) if vault_ok else ""),
+               ("About the user (their profile)", _profile_text())]
         note += "".join(f"\n\n{title}:\n{text}" for title, text in own if text)
     if messages[0]["role"] == "system":
         messages[0] = {"role": "system", "content": str(messages[0]["content"]) + note}
@@ -663,20 +727,106 @@ async def vault_remember(request: Request):
     if bad:
         return bad
     body = await request.json()
-    facts = [_clean_line(x, 300) for x in (body.get("facts") or []) if len(_clean_line(x)) >= 4][:50]
+    facts = [_clean_line(x, 300) for x in (body.get("facts") or []) if len(_clean_line(x)) >= 4][:200]
     person = re.sub(r"[^\w .'-]+", "", str(body.get("person") or "")).strip()[:60]
     src = body.get("source") or f"[[{VAULT_DIR.name}/memory/{_today()}|{_today()}]]"
     if not facts:
         return {"ok": True, "added": 0}
-    target = VAULT_DIR / "people" / f"{person}.md" if person else VAULT_DIR / "facts.md"
-    have = target.read_text(encoding="utf-8", errors="ignore").lower() if target.exists() else ""
-    new = []
-    for f in facts:
-        if f.lower() not in have:
-            new.append(f); have += "\n" + f.lower()
-    _append(target, [f"- {f} (from {src})" for f in new], f"# {person}\n\n" if person else "")
+    if person:
+        target = VAULT_DIR / "people" / f"{person}.md"
+        have = target.read_text(encoding="utf-8", errors="ignore").lower() if target.exists() else ""
+        new = []
+        for f in facts:
+            if f.lower() not in have:
+                new.append(f); have += "\n" + f.lower()
+        _append(target, [f"- {f} (from {src})" for f in new], f"# {person}\n\n")
+    else:
+        lines, have = _facts_load()
+        known = {f["text"].lower() for _, f in have}
+        new = []
+        for f in facts:
+            if f.lower() not in known:
+                known.add(f.lower()); new.append(f)
+                lines.append(_fact_line({"id": _fact_id(None), "text": f, "source": src}))
+        _facts_save(lines)
+        target = VAULT_DIR / "facts.md"
     _reload_docs()
     return {"ok": True, "added": len(new), "file": str(target.relative_to(VAULT))}
+
+
+@app.get("/v1/vault/facts")
+async def vault_facts(request: Request):
+    bad = _vault_ready(request)
+    if bad:
+        return bad
+    _, facts = _facts_load()
+    return {"facts": [f for _, f in facts]}
+
+
+@app.post("/v1/vault/facts")
+async def vault_fact_add(request: Request):
+    """Adds a fact, or replaces one (replaces: id) when it corrects or updates it. The old wording goes to today's log."""
+    bad = _vault_ready(request)
+    if bad:
+        return bad
+    body = await request.json()
+    text = _clean_line(body.get("text"), 300)
+    if len(text) < 4:
+        return JSONResponse({"error": "A fact needs a few words."}, status_code=400)
+    lines, facts = _facts_load()
+    fid = _fact_id(body.get("id"))
+    src = body.get("source") or f"[[{VAULT_DIR.name}/memory/{_today()}|{_today()}]]"
+    same = next(((i, f) for i, f in facts if f["text"].lower() == text.lower()), None)
+    if same:
+        return {"ok": True, "fact": same[1], "added": False}
+    old = next(((i, f) for i, f in facts if f["id"] == str(body.get("replaces") or "")), None)
+    fact = {"id": fid, "text": text, "pinned": bool(body.get("pinned")) or bool(old and old[1]["pinned"]), "source": src}
+    if old:
+        lines[old[0]] = _fact_line(fact)
+        _append(VAULT_DIR / "memory" / f"{_today()}.md", [f"- {time.strftime('%H:%M')} Updated a fact. Was: {old[1]['text']} Now: {text}"], f"# {_today()}\n\n")
+    else:
+        lines.append(_fact_line(fact))
+    _facts_save(lines)
+    return {"ok": True, "fact": fact, "added": True, "replaced": old[1]["id"] if old else None}
+
+
+@app.patch("/v1/vault/facts/{fact_id}")
+async def vault_fact_edit(fact_id: str, request: Request):
+    bad = _vault_ready(request)
+    if bad:
+        return bad
+    body = await request.json()
+    lines, facts = _facts_load()
+    hit = next(((i, f) for i, f in facts if f["id"] == fact_id), None)
+    if not hit:
+        return JSONResponse({"error": "No fact with that id (it may have been edited in Obsidian)."}, status_code=404)
+    f = dict(hit[1])
+    if "text" in body:
+        text = _clean_line(body.get("text"), 300)
+        if len(text) < 2:
+            return JSONResponse({"error": "A fact needs a few words."}, status_code=400)
+        f["text"] = text
+    if "pinned" in body:
+        f["pinned"] = bool(body.get("pinned"))
+    f["id"] = fact_id
+    lines[hit[0]] = _fact_line(f)
+    _facts_save(lines)
+    return {"ok": True, "fact": f}
+
+
+@app.delete("/v1/vault/facts/{fact_id}")
+async def vault_fact_delete(fact_id: str, request: Request):
+    """Forgetting removes the line; nothing about it is written anywhere else."""
+    bad = _vault_ready(request)
+    if bad:
+        return bad
+    lines, facts = _facts_load()
+    hit = next(((i, f) for i, f in facts if f["id"] == fact_id), None)
+    if hit:
+        del lines[hit[0]]
+        _facts_save(lines)
+    return {"ok": True, "deleted": bool(hit)}
+
 
 @app.get("/v1/events")
 async def events_get(request: Request, since: int = 0, limit: int = 2000):
@@ -1194,7 +1344,6 @@ def status_page():
 # /v1/schedule. Diana, email, documents and sync stay on the main, local-only server. Keys are made and revoked from
 # Steward (Settings → Connections), shown once, and stored only as SHA-256 hashes in data/api-keys.json.
 # They are read-only and work only here, never on the main server; the Steward key doesn't work here.
-import hashlib
 from zoneinfo import ZoneInfo
 
 API_PORT = int(os.environ.get("STEWARD_API_PORT", "0") or 0)
@@ -1466,6 +1615,109 @@ async def api_schedule(from_: str = Query(None, alias="from"), to: str = None, l
 async def api_event(event_id: str):
     hit = next((e for e in _events_all() if e["id"] == event_id), None)
     return {"event": hit} if hit else _api_error(404, "not_found", "No event with that id.")
+
+
+# ---------- GitHub relay: a read-only copy for outside agents, without opening this computer ----------
+# Every STEWARD_GITHUB_EVERY minutes (default 15) the server writes me.json, tasks.json and schedule.json (the same shapes
+# as the read-only API) into a private repo (STEWARD_GITHUB_REPO, "owner/name") using STEWARD_GITHUB_TOKEN, a fine-grained
+# token with Contents read/write on that one repo. A file is committed only when it changed. The outside agent reads them
+# with its own read-only token. Only outgoing HTTPS; nothing listens for the internet.
+GH_TOKEN = os.environ.get("STEWARD_GITHUB_TOKEN", "").strip()
+GH_REPO = os.environ.get("STEWARD_GITHUB_REPO", "").strip().strip("/")
+GH_DIR = os.environ.get("STEWARD_GITHUB_DIR", "steward").strip().strip("/")
+GH_EVERY = max(5, int(os.environ.get("STEWARD_GITHUB_EVERY", "15") or 15))
+RELAY = {"last_push": None, "last_check": None, "error": None, "shas": {}, "hashes": {}}
+
+
+def _relay_files():
+    now = int(time.time() * 1000)
+    tasks = [t for t in _tasks_all() if t["status"] == "open" or (t["completed_at"] and _parse_iso(t["completed_at"], "c") > now - 30 * 86400000)]
+    tasks.sort(key=lambda t: (t["status"] != "open", t["due_at"] is None, t["due_at"] or "", t["title"].lower()))
+    lo, hi = now - 7 * 86400000, now + 60 * 86400000
+    evs = sorted((e for e in _events_all() if _parse_iso(e["starts_at"], "s") < hi and _parse_iso(e["ends_at"], "e") > lo), key=lambda e: e["starts_at"])
+    p = _planner()
+    name = os.environ.get("STEWARD_DISPLAY_NAME", "").strip() or ((p.get("settings") or {}).get("name")) or "Steward user"
+    me = {"user": {"id": "usr_" + _hash_key("steward:" + str(HOME))[:10], "display_name": name, "timezone": API_TZ_NAME}}
+    return {"me.json": me,
+            "tasks.json": {"window": "open tasks, and tasks completed in the last 30 days", "tasks": tasks, "next_cursor": None},
+            "schedule.json": {"from": _iso(lo), "to": _iso(hi), "events": evs, "next_cursor": None}}
+
+
+async def _relay_push():
+    """Commits changed files. Each file carries as_of: when its content last changed."""
+    if not (GH_TOKEN and GH_REPO):
+        return
+    RELAY["last_check"] = int(time.time())
+    headers = {"Authorization": f"Bearer {GH_TOKEN}", "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "Steward"}
+    try:
+        files = _relay_files()
+        async with httpx.AsyncClient(timeout=30, follow_redirects=False) as client:
+            for name, body in files.items():
+                digest = _hash_key(json.dumps(body, sort_keys=True))
+                if RELAY["hashes"].get(name) == digest:
+                    continue
+                url = f"https://api.github.com/repos/{GH_REPO}/contents/{GH_DIR}/{name}"
+                if name not in RELAY["shas"]:
+                    r = await client.get(url, headers=headers)
+                    if r.status_code == 200:
+                        RELAY["shas"][name] = r.json().get("sha")
+                        try:  # unchanged since last run: don't commit again
+                            old = json.loads(base64.b64decode(r.json().get("content", "")))
+                            old.pop("as_of", None)
+                            if _hash_key(json.dumps(old, sort_keys=True)) == digest:
+                                RELAY["hashes"][name] = digest
+                                continue
+                        except Exception:
+                            pass
+                    elif r.status_code != 404:
+                        raise ValueError(f"GitHub answered {r.status_code} for {name}: {r.text[:160]}")
+                out = {"as_of": datetime.now(API_TZ).isoformat(timespec="seconds"), **body}
+                payload = {"message": f"Steward: update {name}", "content": base64.b64encode(json.dumps(out, indent=1).encode()).decode()}
+                if RELAY["shas"].get(name):
+                    payload["sha"] = RELAY["shas"][name]
+                r = await client.put(url, headers=headers, json=payload)
+                if r.status_code not in (200, 201):
+                    RELAY["shas"].pop(name, None)  # someone else changed it: look it up again next time
+                    raise ValueError(f"GitHub answered {r.status_code} for {name}: {r.text[:160]}")
+                RELAY["shas"][name] = r.json()["content"]["sha"]
+                RELAY["hashes"][name] = digest
+                RELAY["last_push"] = int(time.time())
+        RELAY["error"] = None
+    except Exception as e:
+        RELAY["error"] = str(e)[:300]
+        print("GitHub relay:", RELAY["error"])
+
+
+async def _relay_loop():
+    await asyncio.sleep(5)
+    while True:
+        await _relay_push()
+        await asyncio.sleep(GH_EVERY * 60)
+
+
+@app.on_event("startup")
+async def _relay_start():
+    if GH_TOKEN and GH_REPO:
+        asyncio.create_task(_relay_loop())
+        print(f"GitHub relay: writing to {GH_REPO}/{GH_DIR} every {GH_EVERY} minutes" + (", work calendar included" if API_WORK_CAL else ""))
+
+
+@app.get("/v1/relay")
+async def relay_status(request: Request):
+    if not _authorized(request):
+        return JSONResponse({"error": "Wrong Steward key."}, status_code=401)
+    return {"configured": bool(GH_TOKEN and GH_REPO), "repo": GH_REPO or None, "folder": GH_DIR, "every_minutes": GH_EVERY,
+            "work_calendar": API_WORK_CAL, "last_push": RELAY["last_push"], "last_check": RELAY["last_check"], "error": RELAY["error"]}
+
+
+@app.post("/v1/relay/push")
+async def relay_push_now(request: Request):
+    if not _authorized(request):
+        return JSONResponse({"error": "Wrong Steward key."}, status_code=401)
+    if not (GH_TOKEN and GH_REPO):
+        return JSONResponse({"error": "Set STEWARD_GITHUB_REPO and STEWARD_GITHUB_TOKEN in steward.env and restart."}, status_code=400)
+    await _relay_push()
+    return await relay_status(request)
 
 if __name__ == "__main__":
     host, port = os.environ.get("HOST", "127.0.0.1"), int(os.environ.get("PORT", "8787"))

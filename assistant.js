@@ -53,19 +53,56 @@ const kinSave = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } 
 /* ---------- memory: what Steward has learned about you ---------- */
 const kinMem = {
   items: kinLoad(KIN_MEM_KEY, []), gone: kinLoad(KIN_MEM_KEY + '.gone', {}), subs: new Set(),
-  commit(items) { this.items = items.slice(0, 300); kinSave(KIN_MEM_KEY, this.items); this.subs.forEach((f) => f()); if (typeof kinMemChanged === 'function') kinMemChanged(); },
+  commit(items) { this.items = items.slice(0, 2000); kinSave(KIN_MEM_KEY, this.items); this.subs.forEach((f) => f()); if (typeof kinMemChanged === 'function') kinMemChanged(); },
   /* Replaces memory with a synced copy, without counting it as a local edit. */
-  replace(items, gone) { this.items = items.slice(0, 300); this.gone = gone || {}; kinSave(KIN_MEM_KEY, this.items); kinSave(KIN_MEM_KEY + '.gone', this.gone); this.subs.forEach((f) => f()); },
+  replace(items, gone) { this.items = items.slice(0, 2000); this.gone = gone || {}; kinSave(KIN_MEM_KEY, this.items); kinSave(KIN_MEM_KEY + '.gone', this.gone); this.subs.forEach((f) => f()); },
+  /* A fact that only repeats what's known is skipped. One about the same thing that says something different
+   * (a correction: "not", "no longer", or new details) replaces the old fact, which is kept as m.was. */
   add(text, source) {
     text = String(text).trim().replace(/\s+/g, ' ').slice(0, 200);
-    if (text.length < 4 || this.items.some((m) => kinSimilar(m.text, text))) return null;
-    const m = { id: uid(), text, source, created: Date.now() };
-    this.commit([m, ...this.items]);
+    if (text.length < 4 || this.items.some((m) => kinSameFact(m.text, text))) return null;
+    const old = this.items.find((m) => kinSimilar(m.text, text));
+    const m = { id: uid(), text, source, created: Date.now(), ...(old ? { replaces: old.id, was: old.text, pinned: old.pinned } : {}) };
+    this.commit([m, ...this.items.filter((x) => !old || x.id !== old.id)]);
+    if (old) { this.gone = { ...this.gone, [old.id]: Date.now() }; kinSave(KIN_MEM_KEY + '.gone', this.gone); }
+    if (this.vault) vaultCall('POST', '/v1/vault/facts', { id: m.id, text, replaces: old ? old.id : null, pinned: !!m.pinned }).catch(() => {});
     return m;
   },
-  update(id, text) { this.commit(this.items.map((m) => (m.id === id ? { ...m, text, upd: Date.now() } : m))); },
-  remove(id) { this.gone = { ...this.gone, [id]: Date.now() }; kinSave(KIN_MEM_KEY + '.gone', this.gone); this.commit(this.items.filter((m) => m.id !== id)); },
+  update(id, text) { this.commit(this.items.map((m) => (m.id === id ? { ...m, text, upd: Date.now() } : m))); if (this.vault) kinMemSaveLater(id); },
+  setPinned(id, pinned) { this.commit(this.items.map((m) => (m.id === id ? { ...m, pinned } : m))); if (this.vault) vaultCall('PATCH', '/v1/vault/facts/' + id, { pinned }).catch(() => {}); },
+  remove(id) { this.gone = { ...this.gone, [id]: Date.now() }; kinSave(KIN_MEM_KEY + '.gone', this.gone); this.commit(this.items.filter((m) => m.id !== id)); if (this.vault) vaultCall('DELETE', '/v1/vault/facts/' + id).catch(() => {}); },
+  /* With Obsidian connected, facts.md is the memory and this list mirrors it. The first time, facts that only exist
+   * here are copied over, so nothing is lost. */
+  vault: false,
+  async fromVault() {
+    if (typeof vaultOn !== 'function' || !vaultOn()) { this.vault = false; return; }
+    try {
+      if (!kinLoad(KIN_MEM_KEY + '.vault', false) && this.items.length) {
+        await vaultCall('POST', '/v1/vault/remember', { facts: this.items.slice().reverse().map((m) => m.text), source: 'Steward memory' });
+        kinSave(KIN_MEM_KEY + '.vault', true);
+      }
+      const { facts } = await vaultCall('GET', '/v1/vault/facts');
+      const prev = Object.fromEntries(this.items.map((m) => [m.id, m]));
+      const day = (src) => { const d = String(src || '').match(/(\d{4}-\d{2}-\d{2})/); return d ? new Date(d[1] + 'T12:00:00').getTime() : null; };
+      this.vault = true; kinSave(KIN_MEM_KEY + '.vault', true);
+      this.replace(facts.slice().reverse().map((f) => ({ id: f.id, text: f.text, pinned: f.pinned, source: (prev[f.id] || {}).source || 'vault', created: (prev[f.id] || {}).created || day(f.source) || Date.now(), ...(prev[f.id] && prev[f.id].was ? { was: prev[f.id].was } : {}) })), this.gone);
+    } catch (e) { /* keep the local copy */ }
+  },
 };
+/* Same fact: no new words, and both say it the same way round (a "not" on one side makes it a correction). */
+const KIN_NEG = /\b(not|no|never|none|don['’]?t|doesn['’]?t|didn['’]?t|isn['’]?t|aren['’]?t|wasn['’]?t|won['’]?t|can['’]?t|longer|anymore|stopped|quit|instead|former(ly)?)\b/i;
+function kinSameFact(a, b) {
+  if (KIN_NEG.test(a) !== KIN_NEG.test(b)) return false;
+  const x = kinTerms(a), y = kinTerms(b);
+  if (!y.size) return a.toLowerCase() === b.toLowerCase();
+  let n = 0; y.forEach((t) => { if (x.has(t)) n++; });
+  return n === y.size;
+}
+let kinMemTimer = {};
+function kinMemSaveLater(id) {
+  clearTimeout(kinMemTimer[id]);
+  kinMemTimer[id] = setTimeout(() => { const m = kinMem.items.find((x) => x.id === id); if (m && m.text.trim().length >= 2) vaultCall('PATCH', '/v1/vault/facts/' + id, { text: m.text }).catch(() => {}); }, 800);
+}
 const kinTerms = (s) => new Set(String(s).toLowerCase().match(/[a-z0-9']{3,}/g) || []);
 function kinSimilar(a, b) {
   const x = kinTerms(a), y = kinTerms(b); if (!x.size || !y.size) return a.toLowerCase() === b.toLowerCase();
@@ -73,9 +110,9 @@ function kinSimilar(a, b) {
   return n / Math.min(x.size, y.size) >= 0.75;
 }
 /* The facts most related to the current message, topped up with the newest ones. */
-function kinRecall(query, limit = 14) {
+function kinRecall(query, limit = 14, keep = () => true) {
   const q = kinTerms(query);
-  const scored = kinMem.items.map((m, i) => { let s = 0; kinTerms(m.text).forEach((t) => { if (q.has(t)) s++; }); return { m, s, i }; });
+  const scored = kinMem.items.filter(keep).map((m, i) => { let s = 0; kinTerms(m.text).forEach((t) => { if (q.has(t)) s++; }); return { m, s, i }; });
   scored.sort((a, b) => (b.s - a.s) || (a.i - b.i));
   return scored.slice(0, limit).map((x) => x.m);
 }
@@ -282,13 +319,15 @@ function plannerSnapshot(state, plan, now) {
 }
 
 function kinSystem(state, plan, userText) {
-  const facts = kinRecall(userText).map((m) => '- ' + m.text);
+  const pinned = kinMem.items.filter((m) => m.pinned).slice(0, 15);
+  const facts = kinRecall(userText, 14, (m) => !m.pinned).map((m) => '- ' + m.text);
   const pats = learnedPatterns(state).map((p) => '- ' + p);
   const past = typeof recallConvos === 'function' ? recallConvos(state, userText) : [];
   const pb = typeof findPlaybook === 'function' ? findPlaybook(state, userText) : null;
   return KIN_BASE
     + (past.length ? '\n\nFrom earlier conversations (use when relevant, mention the date):\n' + past.map((c) => '- ' + fmtD(c.at) + ', ' + c.topic + ': ' + c.points.join(' ')).join('\n') : '')
     + (pb ? '\n\nThe user\'s playbook "' + pb.title + '" (their own lessons from a similar project):\n' + pb.body.slice(0, 1500) : '')
+    + (pinned.length ? '\n\nAlways keep in mind about the user:\n' + pinned.map((m) => '- ' + m.text).join('\n') : '')
     + (facts.length ? '\n\nWhat you know about the user:\n' + facts.join('\n') : '')
     + (pats.length ? '\n\nPatterns noticed from their planner:\n' + pats.join('\n') : '')
     + '\n\nPlanner snapshot:\n' + plannerSnapshot(state, plan, Date.now());
@@ -515,6 +554,13 @@ const DIANA_CTX_KEY = 'steward.diana.ctx.v1';
 /* Diana's notes in the user's Obsidian vault, kept by the Steward server (STEWARD_VAULT). Writes are best-effort:
  * a failed write never interrupts the chat. */
 const vaultOn = () => { const sp = typeof kinSpace === 'function' ? kinSpace() : null; return !!(sp && sp.features && sp.features.includes('vault')); };
+async function vaultCall(method, path, body) {
+  const sp = kinSpace();
+  const r = await fetch(sp.url + path, { method, headers: { Authorization: 'Bearer ' + sp.key, 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || 'vault error ' + r.status);
+  return j;
+}
 async function vaultPost(path, body) {
   const sp = kinSpace();
   const r = await fetch(sp.url + path, { method: 'POST', headers: { Authorization: 'Bearer ' + sp.key, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -577,6 +623,7 @@ function AssistantView(ctx) {
   const onScroll = () => { const el = scrollRef.current; if (!el) return; const near = el.scrollHeight - el.scrollTop - el.clientHeight < 80; stick.current = near; if (near && jump) setJump(false); };
 
   useEffect(() => { const f = () => force((n) => n + 1); kinAI.subs.add(f); kinMem.subs.add(f); return () => { kinAI.subs.delete(f); kinMem.subs.delete(f); }; }, []);
+  useEffect(() => { kinMem.fromVault(); }, []);
   useEffect(() => { kinSave(KIN_CHAT_KEY, msgs.filter((m) => !m.pending).slice(-60)); }, [msgs]);
   /* Past conversations: summarize what hasn't been summarized, after a quiet spell, on leaving, or before clearing. */
   const msgsRef = useRef(msgs); msgsRef.current = msgs;
@@ -623,6 +670,8 @@ function AssistantView(ctx) {
     setMsgs((m) => [...m, { id: uid(), role: 'user', content: text, at: Date.now() }, { id, role: 'assistant', content: '', pending: true, refs, run }]);
     setInput('');
     let reply = '';
+    // Pick up edits made in Obsidian since the last message (a local call; never holds a message up for long).
+    if (vaultOn()) await Promise.race([kinMem.fromVault(), new Promise((r) => setTimeout(r, 1500))]);
     try {
       // Asked about email: look up who is waiting first, so a small model doesn't have to decide to.
       let mail = '';
@@ -682,7 +731,7 @@ function AssistantView(ctx) {
     } catch (e) { patch(id, (x) => ({ content: (e.partial || x.content) + '\n[Error: ' + e.message + ']', pending: false })); return; }
     if (msgsRef.current.filter((m) => !m.summarized && m.role === 'user').length >= 6) remember();
     if (prefs.learn || /^\s*(please\s+)?remember\b/i.test(text)) {
-      try { const learned = await kinLearnFrom(text, reply); if (learned.length) { patch(id, () => ({ learned: learned.map((m) => m.text) })); if (vaultOn()) vaultPost('/v1/vault/remember', { facts: learned.map((m) => m.text) }).catch(() => {}); } } catch (e) {}
+      try { const learned = await kinLearnFrom(text, reply); if (learned.length) patch(id, () => ({ learned: learned.map((m) => (m.was ? m.text + ' (updated; was: ' + m.was + ')' : m.text)) })); } catch (e) {}
     }
   };
   const addDoc = async (f) => {
@@ -773,8 +822,10 @@ function ConnectionsPanel({ setToast }) {
     if (!r.ok) throw new Error(r.status === 404 ? 'Your Steward server needs updating for this.' : j.error || 'server error ' + r.status);
     return j;
   };
-  const load = () => call('GET', '/v1/apikeys').then(setInfo).catch((e) => setInfo({ error: e.message }));
+  const [relay, setRelay] = useState(null);
+  const load = () => { call('GET', '/v1/apikeys').then(setInfo).catch((e) => setInfo({ error: e.message })); call('GET', '/v1/relay').then(setRelay).catch(() => setRelay(null)); };
   useEffect(() => { if (sp && sp.url && sp.key && !sp.id) load(); }, []);
+  const pushNow = () => call('POST', '/v1/relay/push').then((r) => { setRelay(r); setToast({ text: r.error ? 'GitHub: ' + r.error : 'Sent to GitHub', id: uid() }); }).catch((e) => setToast({ text: e.message, id: uid() }));
   if (!sp || !sp.url || !sp.key || sp.id) return null;
   const keys = ((info && info.keys) || []).slice().reverse();
   const make = () => call('POST', '/v1/apikeys', { label: 'Muse (read-only)' }).then((j) => { setFresh(j.key); load(); }).catch((e) => setToast({ text: e.message, id: uid() }));
@@ -785,6 +836,11 @@ function ConnectionsPanel({ setToast }) {
       <p style=${{ margin: '0 0 10px', color: 'var(--ink-2)' }}>Lets an outside agent such as Muse read your tasks and schedule. Keys are read-only: they can't change anything, and they don't reach Diana, email or documents.
         ${info && !info.error ? (info.api_port ? ' The read-only API is on port ' + info.api_port + (info.work_calendar ? ', work calendar included.' : ', work calendar not included.') : ' Turn the API on with STEWARD_API_PORT in steward.env.') : ''}</p>
       ${info && info.error ? html`<p style=${{ color: 'var(--bad)', margin: 0 }}>${info.error}</p>` : null}
+      ${relay && relay.configured ? html`<div style=${{ display: 'flex', gap: '10px', alignItems: 'center', padding: '8px 0', borderTop: '1px solid var(--line)' }}>
+        <span style=${{ flex: 1 }}>GitHub relay → ${relay.repo}/${relay.folder}, every ${relay.every_minutes} min${relay.work_calendar ? ', work calendar included' : ''}
+          <span class="muted"> · ${relay.last_push ? 'last change sent ' + fmtD(relay.last_push * 1000) + ' ' + fmtT(relay.last_push * 1000) : 'nothing sent yet'}</span>
+          ${relay.error ? html`<br /><span style=${{ color: 'var(--bad)' }}>${relay.error}</span>` : null}</span>
+        <button class="btn sm" onClick=${pushNow}>Send now</button></div>` : null}
       ${fresh ? html`<div style=${{ padding: '10px 12px', borderRadius: '12px', background: 'rgba(255,255,255,.45)', margin: '0 0 10px' }}>
         <b>Copy this key now. It won't be shown again.</b> Paste it only into the secure link Muse gives you, never into a chat.
         <div style=${{ display: 'flex', gap: '8px', marginTop: '8px' }}><input class="in" readonly value=${fresh} onFocus=${(e) => e.target.select()} aria-label="New API key" style=${{ fontFamily: 'var(--f-mono)', fontSize: '12px' }} />
@@ -967,6 +1023,7 @@ function DocsPanel({ setToast, p, A, compact }) {
 }
 
 function MemoryPanel({ prefs, setPrefs, pats, setToast }) {
+  useEffect(() => { kinMem.fromVault(); }, []);
   const [draft, setDraft] = useState('');
   const [editing, setEditing] = useState(null);
   const fileRef = useRef();
@@ -991,16 +1048,17 @@ function MemoryPanel({ prefs, setPrefs, pats, setToast }) {
       <div>${kinMem.items.map((m) => html`<div key=${m.id} style=${{ display: 'flex', gap: '8px', alignItems: 'center', padding: '8px 16px', borderTop: '1px solid var(--line)' }}>
         ${editing === m.id
           ? html`<input class="in" autoFocus value=${m.text} onInput=${(e) => kinMem.update(m.id, e.target.value)} onBlur=${() => setEditing(null)} onKeyDown=${(e) => e.key === 'Enter' && setEditing(null)} aria-label="Edit memory" />`
-          : html`<span style=${{ flex: '1' }}>${m.text}</span><span class="small muted">${m.source === 'you' ? 'you told me' : 'learned'} · ${fmtD(m.created)}</span>`}
+          : html`<span style=${{ flex: '1' }}>${m.pinned ? html`<b title="Sent with every message">📌 </b>` : null}${m.text}${m.was ? html`<span class="small muted"> · was: ${m.was}</span>` : null}</span><span class="small muted">${m.source === 'you' ? 'you told me' : m.source === 'vault' ? 'Obsidian' : 'learned'} · ${fmtD(m.created)}</span>`}
+        <button class="btn sm ghost" onClick=${() => kinMem.setPinned(m.id, !m.pinned)} title=${m.pinned ? 'Stop sending this with every message' : 'Send this with every message'}>${m.pinned ? 'Unpin' : 'Pin'}</button>
         <button class="btn sm ghost" onClick=${() => setEditing(editing === m.id ? null : m.id)}>${editing === m.id ? 'Done' : 'Edit'}</button>
         <button class="btn sm ghost" onClick=${() => kinMem.remove(m.id)} aria-label="Forget this">Forget</button>
       </div>`)}</div>
       <div style=${{ padding: '12px 16px', display: 'flex', gap: '8px', flexWrap: 'wrap', borderTop: '1px solid var(--line)' }}>
-        ${vaultOn() ? html`<button class="btn sm" disabled=${!kinMem.items.length} onClick=${() => vaultPost('/v1/vault/remember', { facts: kinMem.items.map((m) => m.text), source: 'Steward memory' }).then((j) => setToast({ text: j.added ? 'Copied ' + j.added + ' fact' + (j.added === 1 ? '' : 's') + ' to ' + j.file : 'Everything here is already in Obsidian', id: uid() })).catch((e) => setToast({ text: e.message, id: uid() }))}>Copy to Obsidian</button>` : null}
+        ${kinMem.vault ? html`<span class="small muted" style=${{ alignSelf: 'center' }}>Kept in Obsidian: Diana/facts.md (edits there show up here)</span>` : null}
         <button class="btn sm" onClick=${exportMem} disabled=${!kinMem.items.length}>Back up memory</button>
         <button class="btn sm" onClick=${() => fileRef.current.click()}>Restore from file</button>
         <input ref=${fileRef} type="file" accept=".json,application/json" hidden onChange=${(e) => { importMem(e.target.files[0]); e.target.value = ''; }} />
-        ${kinMem.items.length ? html`<button class="btn sm ghost" onClick=${() => { if (confirm('Forget everything Diana has learned about you?')) { kinMem.gone = { ...kinMem.gone, ...Object.fromEntries(kinMem.items.map((m) => [m.id, Date.now()])) }; kinSave(KIN_MEM_KEY + '.gone', kinMem.gone); kinMem.commit([]); } }}>Forget everything</button>` : null}
+        ${kinMem.items.length ? html`<button class="btn sm ghost" onClick=${() => { if (confirm('Forget everything Diana has learned about you?' + (kinMem.vault ? ' This also clears Diana/facts.md in Obsidian.' : ''))) { if (kinMem.vault) kinMem.items.slice().forEach((m) => kinMem.remove(m.id)); else { kinMem.gone = { ...kinMem.gone, ...Object.fromEntries(kinMem.items.map((m) => [m.id, Date.now()])) }; kinSave(KIN_MEM_KEY + '.gone', kinMem.gone); kinMem.commit([]); } } }}>Forget everything</button>` : null}
       </div>
     </section>
     <section class="panel">

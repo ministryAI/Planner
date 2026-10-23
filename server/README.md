@@ -82,6 +82,21 @@ Errors are JSON: `{"error":{"code","message"}}`. Requests are limited to 120 a m
 
 This puts a door to your planner on the internet. Use it only if your employer allows that from this computer.
 
+## GitHub relay for outside agents (no open port)
+If this computer can't accept connections from the internet, Steward can send a read-only copy to a private GitHub repo instead, using only outgoing HTTPS. An outside agent like Muse then reads it there.
+1. Create a **private** repo, for example `steward-data`.
+2. Make two fine-grained tokens (GitHub → Settings → Developer settings → Fine-grained tokens), each limited to that one repo:
+   - **Write token:** Contents: Read and write. It goes in `steward.env` on this computer.
+   - **Read token:** Contents: Read-only. It goes only into the agent's secure key entry.
+3. Add these lines to `steward.env` and restart:
+   - `STEWARD_GITHUB_REPO=you/steward-data`
+   - `STEWARD_GITHUB_TOKEN=<write token>`
+   - Optional: `STEWARD_DISPLAY_NAME=Justin`, `STEWARD_GITHUB_EVERY=15` (minutes), and `STEWARD_API_WORK_CALENDAR=1` to include the work calendar (off by default).
+
+Every 15 minutes it writes `steward/me.json`, `steward/tasks.json` and `steward/schedule.json`, in the same shapes as the read-only API. A file is committed only when something changed, and each file has an `as_of` time. You can check the relay and send right away under **Settings → Connections**.
+
+The agent reads a file with `GET https://api.github.com/repos/you/steward-data/contents/steward/tasks.json`, sending the headers `Authorization: Bearer <read token>` and `Accept: application/vnd.github.raw`.
+
 ## Updating the server
 When Steward gets a new server feature, run this once in Terminal. It downloads the new server file and stops the old server:
 ```
